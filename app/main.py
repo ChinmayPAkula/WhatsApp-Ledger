@@ -6,6 +6,9 @@ import os
 from datetime import date
 from xml.sax.saxutils import escape as xml_escape
 from dotenv import load_dotenv
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 from twilio.rest import Client as TwilioClient
 from twilio.request_validator import RequestValidator
 from app.database import save_message, get_recent_messages, save_entries, get_recent_entries, upload_report
@@ -18,6 +21,10 @@ load_dotenv()
 app = FastAPI(title="WhatsApp Store Ledger")
 VERIFY_TOKEN = os.getenv("WHATSAPP_VERIFY_TOKEN")
 API_ACCESS_KEY = os.getenv("API_ACCESS_KEY")
+
+limiter = Limiter(key_func=get_remote_address)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 twilio_client = TwilioClient(os.getenv("TWILIO_ACCOUNT_SID"), os.getenv("TWILIO_AUTH_TOKEN"))
 twilio_validator = RequestValidator(os.getenv("TWILIO_AUTH_TOKEN"))
@@ -102,6 +109,7 @@ async def export_report(month: Optional[str] = None):
 
 # ── TWILIO WEBHOOK (receives WhatsApp messages) ──
 @app.post("/webhook")
+@limiter.limit("20/minute")
 async def receive_twilio_message(
     request: Request,
     background_tasks: BackgroundTasks,

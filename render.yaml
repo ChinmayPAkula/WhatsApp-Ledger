@@ -3,7 +3,7 @@ services:
     name: whatsapp-ledger
     env: python
     buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT --proxy-headers --forwarded-allow-ips='*'
     envVars:
       - key: WHATSAPP_TOKEN
         sync: false
@@ -24,6 +24,8 @@ services:
       - key: TWILIO_WHATSAPP_FROM
         sync: false
       - key: OWNER_WHATSAPP_TO
+        sync: false
+      - key: API_ACCESS_KEY
         sync: false
 
   - type: cron

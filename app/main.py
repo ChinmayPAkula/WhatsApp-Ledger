@@ -1,4 +1,5 @@
-from fastapi import FastAPI, Form, Query, HTTPException, BackgroundTasks
+import hmac
+from fastapi import FastAPI, Form, Query, HTTPException, BackgroundTasks, Request, Header, Depends
 from fastapi.responses import PlainTextResponse, Response
 from typing import Optional
 import os
@@ -6,6 +7,7 @@ from datetime import date
 from xml.sax.saxutils import escape as xml_escape
 from dotenv import load_dotenv
 from twilio.rest import Client as TwilioClient
+from twilio.request_validator import RequestValidator
 from app.database import save_message, get_recent_messages, save_entries, get_recent_entries, upload_report
 from app.extract import extract_entries
 from app.intent import classify_intent
@@ -15,8 +17,16 @@ load_dotenv()
 
 app = FastAPI(title="WhatsApp Store Ledger")
 VERIFY_TOKEN = os.getenv("WHATSAPP_VERIFY_TOKEN")
+API_ACCESS_KEY = os.getenv("API_ACCESS_KEY")
 
 twilio_client = TwilioClient(os.getenv("TWILIO_ACCOUNT_SID"), os.getenv("TWILIO_AUTH_TOKEN"))
+twilio_validator = RequestValidator(os.getenv("TWILIO_AUTH_TOKEN"))
+
+
+def require_api_key(x_api_key: Optional[str] = Header(None)):
+    """Shared-secret gate for read endpoints exposing ledger data (PII, pricing, vendor info)."""
+    if not API_ACCESS_KEY or not x_api_key or not hmac.compare_digest(x_api_key, API_ACCESS_KEY):
+        raise HTTPException(status_code=401, detail="Missing or invalid API key")
 
 
 def format_entry_confirmation(entries: list[dict]) -> str:
@@ -63,21 +73,21 @@ async def root():
 
 
 # ── READ RAW MESSAGES ──
-@app.get("/messages")
+@app.get("/messages", dependencies=[Depends(require_api_key)])
 async def list_messages(limit: int = 20):
     messages = await get_recent_messages(limit)
     return {"count": len(messages), "messages": messages}
 
 
 # ── READ STRUCTURED ENTRIES (Phase 2) ──
-@app.get("/entries")
+@app.get("/entries", dependencies=[Depends(require_api_key)])
 async def list_entries(limit: int = 50):
     entries = await get_recent_entries(limit)
     return {"count": len(entries), "entries": entries}
 
 
 # ── EXCEL EXPORT (Phase 3) ──
-@app.get("/export")
+@app.get("/export", dependencies=[Depends(require_api_key)])
 async def export_report(month: Optional[str] = None):
     """month: 'YYYY-MM', defaults to the current month-to-date."""
     start, end = resolve_period(month)
@@ -93,7 +103,9 @@ async def export_report(month: Optional[str] = None):
 # ── TWILIO WEBHOOK (receives WhatsApp messages) ──
 @app.post("/webhook")
 async def receive_twilio_message(
+    request: Request,
     background_tasks: BackgroundTasks,
+    x_twilio_signature: Optional[str] = Header(None, alias="X-Twilio-Signature"),
     From: str = Form(...),
     To: str = Form(...),
     Body: Optional[str] = Form(None),
@@ -103,6 +115,14 @@ async def receive_twilio_message(
     MessageSid: Optional[str] = Form(None),
     ProfileName: Optional[str] = Form(None),
 ):
+    # Reject anything that isn't actually from Twilio — otherwise anyone who
+    # finds this URL can inject fake ledger entries or trigger the app's
+    # Twilio account to message arbitrary numbers.
+    full_form = await request.form()
+    if not twilio_validator.validate(str(request.url), dict(full_form), x_twilio_signature or ""):
+        print(f"⚠️  Rejected webhook: invalid Twilio signature (validated against url={request.url})")
+        raise HTTPException(status_code=403, detail="Invalid signature")
+
     try:
         sender_phone = From.replace("whatsapp:", "").lstrip("+")
         num_media = int(NumMedia or "0")

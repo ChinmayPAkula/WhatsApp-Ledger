@@ -3,6 +3,7 @@ from fastapi.responses import PlainTextResponse, Response
 from typing import Optional
 import os
 from datetime import date
+from xml.sax.saxutils import escape as xml_escape
 from dotenv import load_dotenv
 from twilio.rest import Client as TwilioClient
 from app.database import save_message, get_recent_messages, save_entries, get_recent_entries, upload_report
@@ -16,6 +17,22 @@ app = FastAPI(title="WhatsApp Store Ledger")
 VERIFY_TOKEN = os.getenv("WHATSAPP_VERIFY_TOKEN")
 
 twilio_client = TwilioClient(os.getenv("TWILIO_ACCOUNT_SID"), os.getenv("TWILIO_AUTH_TOKEN"))
+
+
+def format_entry_confirmation(entries: list[dict]) -> str:
+    """Build a human-readable WhatsApp confirmation for parsed entries."""
+    lines = []
+    for e in entries:
+        if e.get("status") == "unclear" or not e.get("item"):
+            lines.append(f"❓ Couldn't fully parse: {e.get('notes') or 'this item'}")
+            continue
+        qty = f"{e['quantity']}{e.get('unit') or ''}" if e.get("quantity") is not None else ""
+        price = f" @ ₹{e['price_per_unit']}/{e.get('unit') or 'unit'}" if e.get("price_per_unit") is not None else ""
+        total = f" (₹{e['total_price']} total)" if e.get("total_price") is not None else ""
+        vendor = f" — {e['vendor']}" if e.get("vendor") else ""
+        kind = "🛒 Order" if e.get("entry_type") == "order" else "📦 Delivery"
+        lines.append(f"{kind}: {e['item']} {qty}{price}{total}{vendor}".strip())
+    return "✅ Logged:\n" + "\n".join(lines)
 
 
 async def send_report_async(to_whatsapp: str, period: str | None):
@@ -126,8 +143,13 @@ async def receive_twilio_message(
                               f"₹{e.get('price_per_unit') or '-'}/u | "
                               f"vendor={e.get('vendor') or '-'} | "
                               f"cat={e.get('category')}")
+                    confirmation = format_entry_confirmation(entries)
                 else:
                     print(f"   (no entries extracted)")
+                    confirmation = "🤔 Got your message but couldn't identify any items to log."
+
+                twiml = f"<Response><Message><Body>{xml_escape(confirmation)}</Body></Message></Response>"
+                return Response(content=twiml, media_type="application/xml")
 
             elif intent == "report_request":
                 background_tasks.add_task(send_report_async, From, intent_result.get("period"))

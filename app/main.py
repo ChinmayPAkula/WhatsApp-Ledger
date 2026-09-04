@@ -1,9 +1,10 @@
-from fastapi import FastAPI, Form, Query, HTTPException
+from fastapi import FastAPI, Form, Query, HTTPException, BackgroundTasks
 from fastapi.responses import PlainTextResponse, Response
 from typing import Optional
 import os
 from datetime import date
 from dotenv import load_dotenv
+from twilio.rest import Client as TwilioClient
 from app.database import save_message, get_recent_messages, save_entries, get_recent_entries, upload_report
 from app.extract import extract_entries
 from app.intent import classify_intent
@@ -13,6 +14,29 @@ load_dotenv()
 
 app = FastAPI(title="WhatsApp Store Ledger")
 VERIFY_TOKEN = os.getenv("WHATSAPP_VERIFY_TOKEN")
+
+twilio_client = TwilioClient(os.getenv("TWILIO_ACCOUNT_SID"), os.getenv("TWILIO_AUTH_TOKEN"))
+
+
+async def send_report_async(to_whatsapp: str, period: str | None):
+    """Runs after the webhook has already responded to Twilio — generates the
+    report and sends it as a separate outbound message, since report generation
+    is too slow to fit inside Twilio's synchronous webhook timeout."""
+    try:
+        start, end = resolve_period(period)
+        print(f"📊 Generating report for {start} to {end}...")
+        content = await generate_report_workbook(start, end)
+        filename = f"ledger_{start.strftime('%Y-%m')}.xlsx"
+        signed_url = await upload_report(filename, content)
+        twilio_client.messages.create(
+            from_=os.getenv("TWILIO_WHATSAPP_FROM"),
+            to=to_whatsapp,
+            body=f"Here's your report for {start.strftime('%B %Y')}",
+            media_url=[signed_url],
+        )
+        print(f"✅ Sent report to {to_whatsapp}")
+    except Exception as e:
+        print(f"⚠️  Failed to generate/send report: {e}")
 
 
 # ── HEALTH CHECK ──
@@ -52,6 +76,7 @@ async def export_report(month: Optional[str] = None):
 # ── TWILIO WEBHOOK (receives WhatsApp messages) ──
 @app.post("/webhook")
 async def receive_twilio_message(
+    background_tasks: BackgroundTasks,
     From: str = Form(...),
     To: str = Form(...),
     Body: Optional[str] = Form(None),
@@ -105,18 +130,13 @@ async def receive_twilio_message(
                     print(f"   (no entries extracted)")
 
             elif intent == "report_request":
-                start, end = resolve_period(intent_result.get("period"))
-                print(f"📊 Generating report for {start} to {end}...")
-                content = await generate_report_workbook(start, end)
-                filename = f"ledger_{start.strftime('%Y-%m')}.xlsx"
-                signed_url = await upload_report(filename, content)
+                background_tasks.add_task(send_report_async, From, intent_result.get("period"))
                 twiml = (
                     "<Response><Message>"
-                    f"<Body>📊 Here's your report for {start.strftime('%B %Y')}</Body>"
-                    f"<Media>{signed_url}</Media>"
+                    "<Body>📊 Got it — generating your report now, I'll send it in a moment.</Body>"
                     "</Message></Response>"
                 )
-                return Response(content=twiml, media_type="application/xml")
+                return Response(content=twiml, media_type="application/xml", background=background_tasks)
 
             else:
                 print("   (not a ledger entry or report request — skipping extraction)")

@@ -2,9 +2,12 @@ from fastapi import FastAPI, Form, Query, HTTPException
 from fastapi.responses import PlainTextResponse, Response
 from typing import Optional
 import os
+from datetime import date
 from dotenv import load_dotenv
-from app.database import save_message, get_recent_messages, save_entries, get_recent_entries
+from app.database import save_message, get_recent_messages, save_entries, get_recent_entries, upload_report
 from app.extract import extract_entries
+from app.intent import classify_intent
+from app.report import generate_report_workbook, resolve_period
 
 load_dotenv()
 
@@ -30,6 +33,20 @@ async def list_messages(limit: int = 20):
 async def list_entries(limit: int = 50):
     entries = await get_recent_entries(limit)
     return {"count": len(entries), "entries": entries}
+
+
+# ── EXCEL EXPORT (Phase 3) ──
+@app.get("/export")
+async def export_report(month: Optional[str] = None):
+    """month: 'YYYY-MM', defaults to the current month-to-date."""
+    start, end = resolve_period(month)
+    content = await generate_report_workbook(start, end)
+    filename = f"ledger_{start.strftime('%Y-%m')}.xlsx"
+    return Response(
+        content=content,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
+    )
 
 
 # ── TWILIO WEBHOOK (receives WhatsApp messages) ──
@@ -67,19 +84,42 @@ async def receive_twilio_message(
             },
         )
 
-        # Step 2: Extract structured entries via Groq (Phase 2)
+        # Step 2: Classify intent, then route (Phase 3)
         if msg_type == "text" and text.strip() and saved_message:
-            print(f"🤖 Extracting structured entries...")
-            entries = await extract_entries(text)
-            if entries:
-                await save_entries(saved_message["id"], entries)
-                for e in entries:
-                    print(f"   ✓ {e.get('entry_type')} | {e.get('item')} | "
-                          f"qty={e.get('quantity')} {e.get('unit') or ''} | "
-                          f"₹{e.get('price_per_unit') or '-'}/u | "
-                          f"cat={e.get('category')}")
+            intent_result = await classify_intent(text)
+            intent = intent_result["intent"]
+            print(f"🧭 Intent: {intent} (period={intent_result.get('period')})")
+
+            if intent == "entry":
+                print(f"🤖 Extracting structured entries...")
+                entries = await extract_entries(text)
+                if entries:
+                    await save_entries(saved_message["id"], entries)
+                    for e in entries:
+                        print(f"   ✓ {e.get('entry_type')} | {e.get('item')} | "
+                              f"qty={e.get('quantity')} {e.get('unit') or ''} | "
+                              f"₹{e.get('price_per_unit') or '-'}/u | "
+                              f"vendor={e.get('vendor') or '-'} | "
+                              f"cat={e.get('category')}")
+                else:
+                    print(f"   (no entries extracted)")
+
+            elif intent == "report_request":
+                start, end = resolve_period(intent_result.get("period"))
+                print(f"📊 Generating report for {start} to {end}...")
+                content = await generate_report_workbook(start, end)
+                filename = f"ledger_{start.strftime('%Y-%m')}.xlsx"
+                signed_url = await upload_report(filename, content)
+                twiml = (
+                    "<Response><Message>"
+                    f"<Body>📊 Here's your report for {start.strftime('%B %Y')}</Body>"
+                    f"<Media>{signed_url}</Media>"
+                    "</Message></Response>"
+                )
+                return Response(content=twiml, media_type="application/xml")
+
             else:
-                print(f"   (no entries extracted)")
+                print("   (not a ledger entry or report request — skipping extraction)")
 
     except Exception as e:
         print(f"⚠️  Error processing message: {e}")

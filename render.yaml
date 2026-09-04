@@ -15,3 +15,35 @@ services:
         sync: false
       - key: SUPABASE_SERVICE_KEY
         sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: TWILIO_ACCOUNT_SID
+        sync: false
+      - key: TWILIO_AUTH_TOKEN
+        sync: false
+      - key: TWILIO_WHATSAPP_FROM
+        sync: false
+      - key: OWNER_WHATSAPP_TO
+        sync: false
+
+  - type: cron
+    name: whatsapp-ledger-monthly-report
+    env: python
+    schedule: "0 3 1 * *"
+    buildCommand: pip install -r requirements.txt
+    startCommand: python -m app.monthly_report
+    envVars:
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_KEY
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: TWILIO_ACCOUNT_SID
+        sync: false
+      - key: TWILIO_AUTH_TOKEN
+        sync: false
+      - key: TWILIO_WHATSAPP_FROM
+        sync: false
+      - key: OWNER_WHATSAPP_TO
+        sync: false

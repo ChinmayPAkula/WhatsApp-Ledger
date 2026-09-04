@@ -28,10 +28,13 @@ create table if not exists entries (
   category        text,                           -- "Vegetables", "Dairy", etc.
   price_per_unit  numeric,                        -- 40
   total_price     numeric,                        -- 200
+  vendor          text,                           -- "raju vegetables", "babu anna"
   notes           text,                           -- AI's free-text observations
   status          text default 'confirmed',       -- 'confirmed' | 'unclear'
   created_at      timestamptz default now()
 );
+
+alter table entries add column if not exists vendor text;
 
 create index if not exists entries_item_idx       on entries (item);
 create index if not exists entries_category_idx   on entries (category);

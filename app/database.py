@@ -1,4 +1,5 @@
 import os
+from datetime import date, datetime
 from supabase import create_client, Client
 from dotenv import load_dotenv
 
@@ -63,6 +64,7 @@ async def save_entries(message_id: str, entries: list[dict]) -> list[dict]:
             "category": entry.get("category"),
             "price_per_unit": entry.get("price_per_unit"),
             "total_price": entry.get("total_price"),
+            "vendor": entry.get("vendor"),
             "notes": entry.get("notes"),
             "status": entry.get("status", "confirmed"),
         })
@@ -78,6 +80,51 @@ async def get_recent_entries(limit: int = 50) -> list[dict]:
         .select("*")
         .order("created_at", desc=True)
         .limit(limit)
+        .execute()
+    )
+    return result.data
+
+
+async def get_entries_between(start: date, end: date) -> list[dict]:
+    """Entries created in [start, end) — end is exclusive, both as calendar dates.
+    Joins messages to bring in sender_phone."""
+    result = (
+        supabase.table("entries")
+        .select("*, messages(sender_phone)")
+        .gte("created_at", start.isoformat())
+        .lt("created_at", end.isoformat())
+        .order("created_at", desc=False)
+        .execute()
+    )
+    rows = result.data
+    for row in rows:
+        message = row.pop("messages", None) or {}
+        row["sender_phone"] = message.get("sender_phone")
+    return rows
+
+
+REPORTS_BUCKET = "reports"
+
+
+async def upload_report(filename: str, content: bytes) -> str:
+    """Upload a report file to Supabase Storage and return a signed URL (valid 1 hour)."""
+    supabase.storage.from_(REPORTS_BUCKET).upload(
+        filename,
+        content,
+        {"content-type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "upsert": "true"},
+    )
+    signed = supabase.storage.from_(REPORTS_BUCKET).create_signed_url(filename, 3600)
+    return signed["signedURL"] if "signedURL" in signed else signed["signed_url"]
+
+
+async def get_entries_before(before: date) -> list[dict]:
+    """Full (item, vendor) price history before a period, oldest first, for price-change lookups."""
+    result = (
+        supabase.table("entries")
+        .select("item, vendor, price_per_unit, created_at")
+        .lt("created_at", before.isoformat())
+        .not_.is_("price_per_unit", "null")
+        .order("created_at", desc=False)
         .execute()
     )
     return result.data

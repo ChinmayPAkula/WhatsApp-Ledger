@@ -47,6 +47,7 @@ OUTPUT FORMAT — ALWAYS return a JSON object with this exact shape:
       "category": "<one of the categories above>" | null,
       "price_per_unit": <number in rupees> | null,
       "total_price": <number in rupees> | null,
+      "vendor": "<vendor/supplier name if mentioned>" | null,
       "notes": "<any extra context>" | null,
       "status": "confirmed" | "unclear"
     }}
@@ -72,6 +73,7 @@ EXTRACTION RULES:
    - "bill 250" or "paid 200" → total_price = 250
    - "5kg @40" → quantity=5, unit="kg", price_per_unit=40, you may also compute total_price=200
 5. Units: detect from text. "5kg" → quantity=5, unit="kg". If no unit given, leave unit null.
+5b. Vendor: if a supplier/vendor name is mentioned (e.g. "from babu anna", "raju vegetables", a shop name), set vendor to that name (spell-corrected, title case as written). If no vendor is named, leave vendor null. Never guess a vendor from the sender's own phone number.
 6. If the message is NOT about orders/deliveries (e.g. "ok thanks", "good morning"):
    - Return one entry with entry_type="unclear", item=null, status="unclear", notes="<original text>"
 7. NEVER make up information. If a field isn't in the message, leave it null.
@@ -94,7 +96,7 @@ async def extract_entries(message_text: str, message_timestamp: str = None) -> l
 
     try:
         completion = groq_client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+            model="openai/gpt-oss-120b",
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": user_prompt},

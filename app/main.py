@@ -189,19 +189,22 @@ async def receive_twilio_message(
             },
         )
 
-        # Step 2: Stock commands (IN/OUT/REPORT) — a fixed syntax checked before the
-        # general LLM intent classifier, so it never collides with ordinary chat.
-        # A message can have multiple stock lines (one movement per line). Quantity
-        # is always regex-extracted (never touched by the LLM); only the item name
-        # goes through Groq, for spelling correction.
+        # Step 2: Stock commands (IN/OUT/REPORT) — checked before the general LLM
+        # intent classifier, so it never collides with ordinary chat. A single Groq
+        # call extracts every movement from the (possibly multi-line) message; each
+        # extracted quantity is then cross-checked against the raw text before being
+        # trusted, so a hallucinated number gets dropped rather than saved.
         if msg_type == "text" and text.strip() and saved_message:
             stock_msg = await parse_stock_message(text)
 
             if stock_msg is not None:
                 reply_lines = [await apply_stock_command(saved_message["id"], cmd) for cmd in stock_msg["commands"]]
-                for bad_line in stock_msg["unparsed"]:
-                    reply_lines.append(f"❓ Couldn't read: {bad_line}")
-                reply = "\n".join(reply_lines) if reply_lines else "Couldn't read that stock command. Try: IN Cement 50 bags"
+                if not reply_lines:
+                    reply = "Couldn't read that stock command. Try: IN Cement 50 bags"
+                else:
+                    reply = "\n".join(reply_lines)
+                    if len(stock_msg["commands"]) < stock_msg["attempted"]:
+                        reply += "\n⚠️ Some lines couldn't be confidently read — please check and resend those."
                 twiml = f"<Response><Message><Body>{xml_escape(reply)}</Body></Message></Response>"
                 return Response(content=twiml, media_type="application/xml")
 

@@ -76,26 +76,26 @@ def test_imports():
 
 def test_deterministic_parsing():
     section("2. Deterministic parsing")
-    from app.stock import STOCK_LINE_RE, STOCK_ATTEMPT_RE, is_report_command
+    from app.stock import STOCK_ATTEMPT_RE, is_report_command, _quantity_verified_in_text
     from app.report import resolve_period
-
-    m = STOCK_LINE_RE.match("IN Cement 50 bags")
-    check("regex matches well-formed IN command", m is not None and m.group(3) == "50")
-
-    m = STOCK_LINE_RE.match("OUT Steel Rods 10 pieces")
-    check("regex handles multi-word item name", m is not None and m.group(2) == "Steel Rods")
-
-    m = STOCK_LINE_RE.match("in cement 10 bags")
-    check("regex is case-insensitive on the keyword", m is not None)
-
-    m = STOCK_LINE_RE.match("IN Cement fifty bags")
-    check("regex rejects spelled-out numbers", m is None)
 
     check(
         "lowercase 'in'/'out' sentences without a number don't look like stock attempts",
-        not STOCK_ATTEMPT_RE.match("in the evening we ran out") and not STOCK_ATTEMPT_RE.match("out of stock today"),
+        not STOCK_ATTEMPT_RE.search("in the evening we ran out") and not STOCK_ATTEMPT_RE.search("out of stock today"),
     )
-    check("a line with 'in'/'out' + a digit does look like an attempt", bool(STOCK_ATTEMPT_RE.match("in potato 2kg")))
+    check("a line with 'in'/'out' + a digit does look like an attempt", bool(STOCK_ATTEMPT_RE.search("in potato 2kg")))
+    check(
+        "multi-line message: attempt count matches number of qualifying lines",
+        len(STOCK_ATTEMPT_RE.findall("IN Milk 2litres\nIN paneer 4kg\nIn potato 2kg\nOut mushroom 1kg")) == 4,
+    )
+
+    check("quantity cross-check: exact match found", _quantity_verified_in_text(50, "IN cement 50 bags"))
+    check("quantity cross-check: decimal match found", _quantity_verified_in_text(2.5, "IN oil 2.5 litres"))
+    check("quantity cross-check: hallucinated number rejected", not _quantity_verified_in_text(999, "IN cement 50 bags"))
+    check(
+        "quantity cross-check: doesn't false-match a substring of a bigger number",
+        not _quantity_verified_in_text(2, "IN cement 20 bags"),
+    )
 
     check("is_report_command('REPORT')", is_report_command("REPORT"))
     check("is_report_command('REPORT last month')", is_report_command("REPORT last month"))
@@ -116,7 +116,7 @@ async def test_groq():
     section("3. Live Groq calls (intent, extraction, stock parsing)")
     from app.intent import classify_intent
     from app.extract import extract_entries
-    from app.stock import parse_stock_command, parse_stock_command_llm
+    from app.stock import extract_stock_movements
 
     r = await classify_intent("tomato 5kg @40")
     check("classify_intent: ledger message -> entry", r["intent"] == "entry", str(r))
@@ -134,22 +134,29 @@ async def test_groq():
         str(entries),
     )
 
-    r = await parse_stock_command("IN Cemnt 50 bags")
+    r = await extract_stock_movements("IN Cemnt 50 bags")
     check(
-        "parse_stock_command: spelling corrected, quantity exact",
-        r is not None and r["item"] == "cement" and r["quantity"] == 50.0,
+        "extract_stock_movements: single line, spelling corrected, quantity exact",
+        len(r) == 1 and r[0]["item"] == "cement" and r[0]["quantity"] == 50.0,
         str(r),
     )
 
-    r = await parse_stock_command_llm("IN Cement 50 sacks arrived today")
+    r = await extract_stock_movements("IN Milk 2litres\nIN paneer 4kg\nIn potato 2kg\nOut mushroom 1kg")
     check(
-        "parse_stock_command_llm: reworded command still extracts correctly",
-        r is not None and r["direction"] == "in" and r["quantity"] == 50.0,
+        "extract_stock_movements: multi-line message extracts all 4 movements",
+        len(r) == 4 and sum(1 for m in r if m["direction"] == "in") == 3,
         str(r),
     )
 
-    r = await parse_stock_command_llm("IN blah blah nonsense")
-    check("parse_stock_command_llm: gibberish returns None", r is None, str(r))
+    r = await extract_stock_movements("IN Cement 50 sacks arrived today, thanks!")
+    check(
+        "extract_stock_movements: extra surrounding words still extract correctly",
+        len(r) == 1 and r[0]["direction"] == "in" and r[0]["quantity"] == 50.0,
+        str(r),
+    )
+
+    r = await extract_stock_movements("IN blah blah nonsense")
+    check("extract_stock_movements: no quantity present -> nothing extracted", len(r) == 0, str(r))
 
 
 # ── 4. Live Supabase + report generation ──

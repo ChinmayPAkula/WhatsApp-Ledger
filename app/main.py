@@ -17,6 +17,7 @@ from app.intent import classify_intent
 from app.report import generate_report_workbook, generate_stock_report_workbook, generate_message_log_workbook, resolve_period
 from app.stock import parse_stock_message, is_report_command
 from app.audit import parse_log_request
+from app.notify import send_security_alert_async
 
 load_dotenv()
 
@@ -253,10 +254,26 @@ async def receive_twilio_message(
                         "</Message></Response>"
                     )
                     return Response(content=twiml, media_type="application/xml", background=background_tasks)
-                else:
-                    print(f"⚠️  Log request with missing/incorrect password from {sender_phone}")
-                    twiml = "<Response><Message><Body>❌ Incorrect password.</Body></Message></Response>"
+
+                elif not log_request["password_given"]:
+                    # Forgot the password entirely — just show the right format,
+                    # no alert (this isn't a real auth failure, nothing was guessed).
+                    reply = "🔒 Please include the password, e.g. \"send me this month logs password <password>\""
+                    twiml = f"<Response><Message><Body>{xml_escape(reply)}</Body></Message></Response>"
                     return Response(content=twiml, media_type="application/xml")
+
+                else:
+                    # An actual wrong password was submitted — a real auth failure,
+                    # already captured in the message log via save_message() above,
+                    # plus a proactive alert since a silent record is easy to miss.
+                    print(f"🚨 Incorrect log password from {sender_phone}: {text!r}")
+                    background_tasks.add_task(send_security_alert_async, sender_phone, text)
+                    twiml = (
+                        "<Response><Message>"
+                        "<Body>❌ Incorrect password. This attempt has been logged and reported.</Body>"
+                        "</Message></Response>"
+                    )
+                    return Response(content=twiml, media_type="application/xml", background=background_tasks)
 
         # Step 4: Classify intent, then route (Phase 3)
         if msg_type == "text" and text.strip() and saved_message:

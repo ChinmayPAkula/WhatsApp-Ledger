@@ -118,15 +118,16 @@ def test_deterministic_parsing():
     from app.audit import parse_log_request
     check(
         "parse_log_request: correct password authorizes",
-        parse_log_request("send me this month logs password pineapple") == {"authorized": True, "period": "this_month"},
+        parse_log_request("send me this month logs password pineapple")
+        == {"authorized": True, "password_given": True, "period": "this_month"},
     )
     check(
-        "parse_log_request: wrong password rejected",
-        parse_log_request("send me this month logs password wrongword")["authorized"] is False,
+        "parse_log_request: wrong (but given) password rejected, distinguished from missing",
+        parse_log_request("send me this month logs password wrongword") == {"authorized": False, "password_given": True, "period": "this_month"},
     )
     check(
-        "parse_log_request: missing password rejected, not a crash",
-        parse_log_request("send me this month logs")["authorized"] is False,
+        "parse_log_request: missing password rejected, distinguished from wrong",
+        parse_log_request("send me this month logs") == {"authorized": False, "password_given": False, "period": "this_month"},
     )
     check("parse_log_request: unrelated message is not an attempt", parse_log_request("ok thanks") is None)
     check(
@@ -352,8 +353,14 @@ def test_webhook_live():
             )
             r = post_webhook(client, "send me this month logs password wrongword")
             check(
-                "wrong-password log request is rejected, not silently accepted",
-                r.status_code == 200 and "Incorrect password" in r.text,
+                "wrong-password log request is rejected and flagged as reported",
+                r.status_code == 200 and "Incorrect password" in r.text and "reported" in r.text,
+                r.text,
+            )
+            r = post_webhook(client, "send me this month logs")
+            check(
+                "missing-password log request prompts for the format, not a flat rejection",
+                r.status_code == 200 and "Please include the password" in r.text and "Incorrect" not in r.text,
                 r.text,
             )
 

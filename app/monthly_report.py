@@ -13,15 +13,9 @@ from twilio.rest import Client
 
 from app.database import upload_report
 from app.report import generate_report_workbook, generate_stock_report_workbook, resolve_period
+from app.notify import get_recipients
 
 load_dotenv()
-
-
-def get_recipients() -> list[str]:
-    """OWNER_WHATSAPP_TO is a comma-separated list, e.g.
-    'whatsapp:+91...,whatsapp:+91...' — one owner or several."""
-    raw = os.getenv("OWNER_WHATSAPP_TO", "")
-    return [r.strip() for r in raw.split(",") if r.strip()]
 
 
 async def main():

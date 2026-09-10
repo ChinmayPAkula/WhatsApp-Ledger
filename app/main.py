@@ -255,6 +255,15 @@ async def receive_twilio_message(
                 )
                 return Response(content=twiml, media_type="application/xml", background=background_tasks)
 
+            elif intent == "stock_report_request":
+                background_tasks.add_task(send_stock_report_async, From, intent_result.get("period"))
+                twiml = (
+                    "<Response><Message>"
+                    "<Body>📦 Got it — generating your stock report now, I'll send it in a moment.</Body>"
+                    "</Message></Response>"
+                )
+                return Response(content=twiml, media_type="application/xml", background=background_tasks)
+
             else:
                 print("   (not a ledger entry or report request — skipping extraction)")
 

@@ -121,6 +121,9 @@ async def test_groq():
     r = await classify_intent("tomato 5kg @40")
     check("classify_intent: ledger message -> entry", r["intent"] == "entry", str(r))
 
+    r = await classify_intent("give me the in out stock report")
+    check("classify_intent: stock report phrase -> stock_report_request", r["intent"] == "stock_report_request", str(r))
+
     r = await classify_intent("send me this months excel sheet")
     check("classify_intent: report phrase -> report_request", r["intent"] == "report_request", str(r))
 
@@ -303,6 +306,19 @@ def test_webhook_live():
                 r.text,
             )
 
+            r = post_webhook(client, "give me the in out stock report")
+            check(
+                "natural-language stock report request routes to stock report, not ledger report",
+                r.status_code == 200 and "generating your stock report" in r.text,
+                r.text,
+            )
+            r = post_webhook(client, "send me this months excel sheet")
+            check(
+                "natural-language ledger report request still routes to ledger report",
+                r.status_code == 200 and "generating your report" in r.text and "stock" not in r.text.lower(),
+                r.text,
+            )
+
             api_key = os.getenv("API_ACCESS_KEY")
             r = client.get("/messages")
             check("GET /messages without API key -> 401", r.status_code == 401)
@@ -345,14 +361,15 @@ def cleanup():
         supabase.table("messages").delete().in_("id", ids).execute()
     print(f"  removed {len(ids)} test message(s) and their entries/stock rows (sender={TEST_SENDER})")
 
-    # The REPORT command's background task regenerates this month's stock
-    # report for real during the live webhook test — remove it again.
-    try:
-        this_month_stock_file = f"stock_{date.today().strftime('%Y-%m')}.xlsx"
-        supabase.storage.from_("reports").remove([this_month_stock_file])
-        print(f"  removed regenerated {this_month_stock_file}")
-    except Exception:
-        pass
+    # The REPORT / report-request commands' background tasks regenerate this
+    # month's report files for real during the live webhook test — remove them.
+    month = date.today().strftime("%Y-%m")
+    for regenerated in (f"stock_{month}.xlsx", f"ledger_{month}.xlsx"):
+        try:
+            supabase.storage.from_("reports").remove([regenerated])
+            print(f"  removed regenerated {regenerated}")
+        except Exception:
+            pass
 
 
 def main():

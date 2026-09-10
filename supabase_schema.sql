@@ -54,8 +54,11 @@ create table if not exists stock_transactions (
   item        text not null,
   quantity    numeric not null,
   unit        text,                   -- "bags", "kg", "pieces"
+  remaining   numeric,                -- running balance for this item as of this transaction
   created_at  timestamptz default now()
 );
+
+alter table stock_transactions add column if not exists remaining numeric;
 
 create index if not exists stock_transactions_item_idx    on stock_transactions (item);
 create index if not exists stock_transactions_created_idx on stock_transactions (created_at desc);

@@ -11,7 +11,7 @@ from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 from twilio.rest import Client as TwilioClient
 from twilio.request_validator import RequestValidator
-from app.database import save_message, get_recent_messages, save_entries, get_recent_entries, upload_report, save_stock_transaction, get_stock_transactions_for_item
+from app.database import save_message, get_recent_messages, save_entries, get_recent_entries, upload_report, save_stock_transaction
 from app.extract import extract_entries
 from app.intent import classify_intent
 from app.report import generate_report_workbook, generate_stock_report_workbook, resolve_period
@@ -54,18 +54,16 @@ def format_entry_confirmation(entries: list[dict]) -> str:
 
 
 async def apply_stock_command(message_id: str, cmd: dict) -> str:
-    """Saves one stock movement and returns its confirmation line, including the
-    running balance for that item computed from the full transaction history."""
-    await save_stock_transaction(message_id, cmd["direction"], cmd["item"], cmd["quantity"], cmd["unit"])
-    history = await get_stock_transactions_for_item(cmd["item"])
-    balance = sum(
-        float(r["quantity"]) if r["direction"] == "in" else -float(r["quantity"])
-        for r in history
-    )
+    """Saves one stock movement and returns its confirmation line. The running
+    balance comes straight from the row's stored `remaining` snapshot, computed
+    once at insert time — no need to re-sum the whole history on every read."""
+    saved = await save_stock_transaction(message_id, cmd["direction"], cmd["item"], cmd["quantity"], cmd["unit"])
+    balance = saved["remaining"] if saved else None
     unit = cmd["unit"] or ""
+    balance_str = f"{balance:g}{unit}" if balance is not None else "unknown"
     if cmd["direction"] == "in":
-        return f"✅ Stock IN: {cmd['item']} +{cmd['quantity']:g}{unit} (balance: {balance:g}{unit})"
-    return f"📤 Stock OUT: {cmd['item']} -{cmd['quantity']:g}{unit} (balance: {balance:g}{unit})"
+        return f"✅ Stock IN: {cmd['item']} +{cmd['quantity']:g}{unit} (balance: {balance_str})"
+    return f"📤 Stock OUT: {cmd['item']} -{cmd['quantity']:g}{unit} (balance: {balance_str})"
 
 
 async def send_report_async(to_whatsapp: str, period: str | None):

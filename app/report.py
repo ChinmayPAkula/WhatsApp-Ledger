@@ -187,7 +187,7 @@ async def generate_report_workbook(start: date, end: date) -> bytes:
     return buf.getvalue()
 
 
-STOCK_MOVEMENT_HEADERS = ["Date", "Sender", "Item", "Quantity", "Unit"]
+STOCK_MOVEMENT_HEADERS = ["Date", "Sender", "Item", "Quantity", "Unit", "Remaining"]
 
 
 def _write_movement_sheet(ws, rows: list[dict]):
@@ -199,6 +199,7 @@ def _write_movement_sheet(ws, rows: list[dict]):
         ws.cell(row=r, column=3, value=row.get("item"))
         ws.cell(row=r, column=4, value=row.get("quantity"))
         ws.cell(row=r, column=5, value=row.get("unit"))
+        ws.cell(row=r, column=6, value=row.get("remaining"))
     for col in range(1, len(STOCK_MOVEMENT_HEADERS) + 1):
         ws.column_dimensions[get_column_letter(col)].width = 18
 

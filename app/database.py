@@ -133,12 +133,24 @@ async def get_entries_before(before: date) -> list[dict]:
 # ── STOCK TRANSACTIONS (IN / OUT ledger) ──
 
 async def save_stock_transaction(message_id: str, direction: str, item: str, quantity: float, unit: str | None) -> dict:
+    """Computes and stores the running balance for this item as of this transaction
+    (`remaining`). This is a one-time snapshot written at insert time, never updated
+    afterward — it's not a separately maintained mutable total, so it can't drift out
+    of sync with the log; it's just a cache of what SUM() would have given at this point."""
+    prior = await get_stock_transactions_for_item(item)
+    prior_balance = sum(
+        float(r["quantity"]) if r["direction"] == "in" else -float(r["quantity"])
+        for r in prior
+    )
+    remaining = prior_balance + quantity if direction == "in" else prior_balance - quantity
+
     row = {
         "message_id": message_id,
         "direction": direction,
         "item": item,
         "quantity": quantity,
         "unit": unit,
+        "remaining": remaining,
     }
     result = supabase.table("stock_transactions").insert(row).execute()
     return result.data[0] if result.data else None

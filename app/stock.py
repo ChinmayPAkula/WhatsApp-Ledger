@@ -15,6 +15,7 @@ import re
 import json
 from groq import Groq
 from app.extract import groq_client as _shared_client
+from app.canonicalize import get_known_items, canonicalize
 
 groq_client: Groq = _shared_client
 
@@ -101,6 +102,19 @@ async def extract_stock_movements(text: str) -> list[dict]:
             "quantity": float(quantity),
             "unit": m.get("unit"),
         })
+
+    # Snap each item onto an existing stock item name if one's a close match,
+    # so the same physical item doesn't split into two balances purely from
+    # LLM spelling variance between messages ("cement" vs "cemnt" already
+    # handled by the prompt, but drift like "masal puri"/"masala puri" isn't).
+    if verified:
+        known_items = await get_known_items("stock_transactions")
+        for movement in verified:
+            canonical = canonicalize(movement["item"], known_items)
+            if canonical != movement["item"]:
+                print(f"   📎 Canonicalized stock item: {movement['item']!r} -> {canonical!r}")
+            movement["item"] = canonical
+
     return verified
 
 

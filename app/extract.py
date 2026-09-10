@@ -11,6 +11,7 @@ import json
 from datetime import datetime
 from groq import Groq
 from dotenv import load_dotenv
+from app.canonicalize import get_known_items, canonicalize
 
 load_dotenv()
 
@@ -115,6 +116,18 @@ async def extract_entries(message_text: str, message_timestamp: str = None) -> l
         if not isinstance(entries, list):
             print(f"⚠️  Groq returned non-list entries: {entries}")
             return []
+
+        # Snap each item name onto an existing spelling if one's a close match,
+        # so the same real item doesn't drift across messages ("masal puri" vs
+        # "masala puri") purely from LLM sampling variance between calls.
+        if entries:
+            known_items = await get_known_items("entries")
+            for entry in entries:
+                if entry.get("item"):
+                    canonical = canonicalize(entry["item"], known_items)
+                    if canonical != entry["item"]:
+                        print(f"   📎 Canonicalized item: {entry['item']!r} -> {canonical!r}")
+                    entry["item"] = canonical
 
         return entries
 

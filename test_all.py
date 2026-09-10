@@ -97,6 +97,12 @@ def test_deterministic_parsing():
         not _quantity_verified_in_text(2, "IN cement 20 bags"),
     )
 
+    from app.canonicalize import canonicalize
+    check("canonicalize: near-duplicate spelling snaps to existing item", canonicalize("masal puri", ["masala puri"]) == "masala puri")
+    check("canonicalize: exact match is a no-op", canonicalize("masala puri", ["masala puri"]) == "masala puri")
+    check("canonicalize: unrelated item is left alone", canonicalize("tomato", ["potato", "onion"]) == "tomato")
+    check("canonicalize: no known items is a no-op", canonicalize("tomato", []) == "tomato")
+
     check("is_report_command('REPORT')", is_report_command("REPORT"))
     check("is_report_command('REPORT last month')", is_report_command("REPORT last month"))
     check("is_report_command('report') is False (case-sensitive)", not is_report_command("report"))

@@ -76,20 +76,26 @@ def test_imports():
 
 def test_deterministic_parsing():
     section("2. Deterministic parsing")
-    from app.stock import STOCK_RE, is_report_command
+    from app.stock import STOCK_LINE_RE, STOCK_ATTEMPT_RE, is_report_command
     from app.report import resolve_period
 
-    m = STOCK_RE.match("IN Cement 50 bags")
+    m = STOCK_LINE_RE.match("IN Cement 50 bags")
     check("regex matches well-formed IN command", m is not None and m.group(3) == "50")
 
-    m = STOCK_RE.match("OUT Steel Rods 10 pieces")
+    m = STOCK_LINE_RE.match("OUT Steel Rods 10 pieces")
     check("regex handles multi-word item name", m is not None and m.group(2) == "Steel Rods")
 
-    m = STOCK_RE.match("IN Cement fifty bags")
+    m = STOCK_LINE_RE.match("in cement 10 bags")
+    check("regex is case-insensitive on the keyword", m is not None)
+
+    m = STOCK_LINE_RE.match("IN Cement fifty bags")
     check("regex rejects spelled-out numbers", m is None)
 
-    m = STOCK_RE.match("in the evening we ran out")
-    check("regex rejects lowercase sentence (no collision)", m is None)
+    check(
+        "lowercase 'in'/'out' sentences without a number don't look like stock attempts",
+        not STOCK_ATTEMPT_RE.match("in the evening we ran out") and not STOCK_ATTEMPT_RE.match("out of stock today"),
+    )
+    check("a line with 'in'/'out' + a digit does look like an attempt", bool(STOCK_ATTEMPT_RE.match("in potato 2kg")))
 
     check("is_report_command('REPORT')", is_report_command("REPORT"))
     check("is_report_command('REPORT last month')", is_report_command("REPORT last month"))
@@ -255,10 +261,31 @@ def test_webhook_live():
                 r.text,
             )
 
+            r = post_webhook(client, "IN 50")
+            check(
+                "stock attempt with a digit but no item gets a usage hint, not silent failure",
+                r.status_code == 200 and "Couldn't read" in r.text,
+                r.text,
+            )
+
             r = post_webhook(client, "IN Cement fifty bags")
             check(
-                "malformed stock command gets a usage hint, not silent failure",
-                r.status_code == 200 and "Couldn't read" in r.text,
+                "word-numbered quantity (no digit) falls through to normal ledger handling",
+                r.status_code == 200 and "Stock" not in r.text,
+                r.text,
+            )
+
+            r = post_webhook(client, "IN Milk 2litres\nIN paneer 4kg\nIn potato 2kg\nOut mushroom 1kg")
+            check(
+                "multi-line message logs all 4 stock movements",
+                r.status_code == 200 and r.text.count("Stock IN") == 3 and r.text.count("Stock OUT") == 1,
+                r.text,
+            )
+
+            r = post_webhook(client, "in the evening we ran out")
+            check(
+                "lowercase non-command sentence isn't misrouted into stock parsing",
+                r.status_code == 200 and "Couldn't read" not in r.text and "Stock" not in r.text,
                 r.text,
             )
 

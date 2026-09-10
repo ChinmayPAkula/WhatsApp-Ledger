@@ -15,7 +15,7 @@ from app.database import save_message, get_recent_messages, save_entries, get_re
 from app.extract import extract_entries
 from app.intent import classify_intent
 from app.report import generate_report_workbook, generate_stock_report_workbook, resolve_period
-from app.stock import parse_stock_command, parse_stock_command_llm, is_report_command
+from app.stock import parse_stock_message, is_report_command
 
 load_dotenv()
 
@@ -51,6 +51,21 @@ def format_entry_confirmation(entries: list[dict]) -> str:
         kind = "🛒 Order" if e.get("entry_type") == "order" else "📦 Delivery"
         lines.append(f"{kind}: {e['item']} {qty}{price}{total}{vendor}".strip())
     return "✅ Logged:\n" + "\n".join(lines)
+
+
+async def apply_stock_command(message_id: str, cmd: dict) -> str:
+    """Saves one stock movement and returns its confirmation line, including the
+    running balance for that item computed from the full transaction history."""
+    await save_stock_transaction(message_id, cmd["direction"], cmd["item"], cmd["quantity"], cmd["unit"])
+    history = await get_stock_transactions_for_item(cmd["item"])
+    balance = sum(
+        float(r["quantity"]) if r["direction"] == "in" else -float(r["quantity"])
+        for r in history
+    )
+    unit = cmd["unit"] or ""
+    if cmd["direction"] == "in":
+        return f"✅ Stock IN: {cmd['item']} +{cmd['quantity']:g}{unit} (balance: {balance:g}{unit})"
+    return f"📤 Stock OUT: {cmd['item']} -{cmd['quantity']:g}{unit} (balance: {balance:g}{unit})"
 
 
 async def send_report_async(to_whatsapp: str, period: str | None):
@@ -174,35 +189,19 @@ async def receive_twilio_message(
             },
         )
 
-        # Step 2: Stock commands (IN/OUT/REPORT) — a fixed, case-sensitive syntax checked
-        # before the general LLM intent classifier, so it never collides with ordinary
-        # lowercase chat. Quantity is always regex-extracted (never touched by the LLM);
-        # only the item name goes through Groq, for spelling correction.
+        # Step 2: Stock commands (IN/OUT/REPORT) — a fixed syntax checked before the
+        # general LLM intent classifier, so it never collides with ordinary chat.
+        # A message can have multiple stock lines (one movement per line). Quantity
+        # is always regex-extracted (never touched by the LLM); only the item name
+        # goes through Groq, for spelling correction.
         if msg_type == "text" and text.strip() and saved_message:
-            stock_cmd = await parse_stock_command(text)
-            if stock_cmd is None and (text.startswith("IN ") or text.startswith("OUT ")):
-                stock_cmd = await parse_stock_command_llm(text)
+            stock_msg = await parse_stock_message(text)
 
-            if stock_cmd:
-                await save_stock_transaction(
-                    saved_message["id"], stock_cmd["direction"], stock_cmd["item"],
-                    stock_cmd["quantity"], stock_cmd["unit"],
-                )
-                history = await get_stock_transactions_for_item(stock_cmd["item"])
-                balance = sum(
-                    float(r["quantity"]) if r["direction"] == "in" else -float(r["quantity"])
-                    for r in history
-                )
-                unit = stock_cmd["unit"] or ""
-                if stock_cmd["direction"] == "in":
-                    reply = f"✅ Stock IN: {stock_cmd['item']} +{stock_cmd['quantity']:g}{unit} (balance: {balance:g}{unit})"
-                else:
-                    reply = f"📤 Stock OUT: {stock_cmd['item']} -{stock_cmd['quantity']:g}{unit} (balance: {balance:g}{unit})"
-                twiml = f"<Response><Message><Body>{xml_escape(reply)}</Body></Message></Response>"
-                return Response(content=twiml, media_type="application/xml")
-
-            elif text.startswith("IN ") or text.startswith("OUT "):
-                reply = "Couldn't read that stock command. Try: IN Cement 50 bags"
+            if stock_msg is not None:
+                reply_lines = [await apply_stock_command(saved_message["id"], cmd) for cmd in stock_msg["commands"]]
+                for bad_line in stock_msg["unparsed"]:
+                    reply_lines.append(f"❓ Couldn't read: {bad_line}")
+                reply = "\n".join(reply_lines) if reply_lines else "Couldn't read that stock command. Try: IN Cement 50 bags"
                 twiml = f"<Response><Message><Body>{xml_escape(reply)}</Body></Message></Response>"
                 return Response(content=twiml, media_type="application/xml")
 

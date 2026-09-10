@@ -2,9 +2,15 @@
 Stock command parsing — IN / OUT / REPORT, a deliberately rigid fixed-syntax
 command language, separate from the free-text ledger entries in extract.py.
 
-Case-sensitive by design: the fast path only fires on literal uppercase
-"IN"/"OUT"/"REPORT" as the first token, so ordinary lowercase sentences
-("in the evening we...") never get misrouted into stock parsing.
+Matching is case-insensitive on the IN/OUT keyword (real usage isn't
+consistently capitalized), but the requirement that the *rest* of the line
+end in "<number> [unit]" is what actually guards against collisions with
+ordinary sentences — a normal message starting with "in "/"out " essentially
+never also ends in a bare quantity.
+
+A message can contain multiple stock lines (workers often log several items
+in one WhatsApp message, one per line) — each line starting with in/out is
+parsed independently.
 
 Quantity is always extracted by regex, never by the LLM — the only thing
 Groq ever touches is the item name, purely to spell-correct it. This keeps
@@ -19,7 +25,13 @@ from app.extract import groq_client as _shared_client
 
 groq_client: Groq = _shared_client
 
-STOCK_RE = re.compile(r"^(IN|OUT)\s+(.+?)\s+(\d+(?:\.\d+)?)\s*(\S+)?$")
+STOCK_LINE_RE = re.compile(r"^(IN|OUT)\s+(.+?)\s+(\d+(?:\.\d+)?)\s*(\S+)?$", re.IGNORECASE)
+# Used only to decide whether a line is even an *attempt* at a stock command
+# (so a failed one gets a usage hint instead of silently vanishing). Requires
+# a digit too — "in the evening we ran out" starts with "in " but has no
+# quantity, so it correctly falls through to normal handling instead of
+# getting flagged as a malformed stock command.
+STOCK_ATTEMPT_RE = re.compile(r"^(IN|OUT)\s.*\d", re.IGNORECASE)
 
 SPELLING_SYSTEM_PROMPT = """You correct the spelling of a single inventory item name from a
 WhatsApp stock-tracking bot (e.g. "cemnt" -> "cement", "stel rods" -> "steel rods").
@@ -27,8 +39,8 @@ Keep it lowercase, keep multi-word names as-is if already correct, never change 
 or guess a different item. Return ONLY a JSON object: {"item": "<corrected name>"}
 """
 
-LLM_SYSTEM_PROMPT = """You extract a stock movement command from a WhatsApp message that
-clearly starts with "IN" or "OUT" but doesn't follow the exact expected format
+LLM_SYSTEM_PROMPT = """You extract a stock movement command from one line of a WhatsApp
+message that clearly starts with "IN" or "OUT" but doesn't follow the exact expected format
 "IN <item> <quantity> <unit>" (e.g. it has extra words or reordered fields).
 
 Return ONLY a JSON object of this exact shape:
@@ -68,13 +80,13 @@ async def correct_item_spelling(raw_item: str) -> str:
         return raw_item.strip().lower()
 
 
-async def parse_stock_command(text: str) -> dict | None:
-    """Regex extracts direction/quantity/unit deterministically; the item name alone
-    is spell-corrected via Groq. Returns {direction, item, quantity, unit} or None if
-    the message doesn't match the strict IN/OUT format at all."""
-    if not text:
+async def parse_stock_command(line: str) -> dict | None:
+    """Regex extracts direction/quantity/unit deterministically from a single line;
+    the item name alone is spell-corrected via Groq. Returns
+    {direction, item, quantity, unit} or None if the line doesn't match at all."""
+    if not line:
         return None
-    match = STOCK_RE.match(text.strip())
+    match = STOCK_LINE_RE.match(line.strip())
     if not match:
         return None
     direction, raw_item, quantity, unit = match.groups()
@@ -87,16 +99,16 @@ async def parse_stock_command(text: str) -> dict | None:
     }
 
 
-async def parse_stock_command_llm(text: str) -> dict | None:
-    """Full LLM fallback for messages that start with 'IN '/'OUT ' but don't match the
+async def parse_stock_command_llm(line: str) -> dict | None:
+    """Full LLM fallback for a line that starts with 'IN '/'OUT ' but doesn't match the
     strict format at all (e.g. reordered or with extra words) — only reached when the
-    regex path above can't even locate a numeral quantity."""
+    regex path above can't even locate a numeral quantity on that line."""
     try:
         completion = groq_client.chat.completions.create(
             model="openai/gpt-oss-120b",
             messages=[
                 {"role": "system", "content": LLM_SYSTEM_PROMPT},
-                {"role": "user", "content": text},
+                {"role": "user", "content": line},
             ],
             response_format={"type": "json_object"},
             temperature=0.1,
@@ -118,6 +130,32 @@ async def parse_stock_command_llm(text: str) -> dict | None:
     except Exception as e:
         print(f"⚠️  Stock LLM fallback failed: {e}")
         return None
+
+
+async def parse_stock_message(text: str) -> dict | None:
+    """Splits a message into lines and parses every line that looks like a stock
+    command (starts with in/out, case-insensitive). Returns None if no line even
+    looks like an attempt at one — lets the caller fall through to normal ledger/
+    intent handling. Otherwise returns {"commands": [...], "unparsed": [raw lines
+    that started with in/out but couldn't be parsed by either regex or LLM]}."""
+    if not text:
+        return None
+    stock_lines = [line.strip() for line in text.splitlines() if STOCK_ATTEMPT_RE.match(line.strip())]
+    if not stock_lines:
+        return None
+
+    commands = []
+    unparsed = []
+    for line in stock_lines:
+        cmd = await parse_stock_command(line)
+        if cmd is None:
+            cmd = await parse_stock_command_llm(line)
+        if cmd:
+            commands.append(cmd)
+        else:
+            unparsed.append(line)
+
+    return {"commands": commands, "unparsed": unparsed}
 
 
 def is_report_command(text: str) -> bool:

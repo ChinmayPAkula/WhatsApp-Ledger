@@ -46,6 +46,21 @@ async def get_recent_messages(limit: int = 20) -> list[dict]:
     return result.data
 
 
+async def get_messages_between(start: date, end: date) -> list[dict]:
+    """Every raw inbound message in [start, end) — the audit-log source: who sent
+    what, when, regardless of whether it turned into a ledger entry, stock
+    movement, or nothing at all."""
+    result = (
+        supabase.table("messages")
+        .select("*")
+        .gte("created_at", start.isoformat())
+        .lt("created_at", end.isoformat())
+        .order("created_at", desc=False)
+        .execute()
+    )
+    return result.data
+
+
 # ── ENTRIES (structured, from Phase 2) ──
 
 async def save_entries(message_id: str, entries: list[dict]) -> list[dict]:

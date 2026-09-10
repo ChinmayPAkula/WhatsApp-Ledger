@@ -17,6 +17,7 @@ from app.database import (
     get_entries_before,
     get_all_stock_transactions,
     get_stock_transactions_between,
+    get_messages_between,
 )
 
 
@@ -238,6 +239,37 @@ async def generate_stock_report_workbook(start: date, end: date) -> bytes:
 
     ws_out = wb.create_sheet("OUT")
     _write_movement_sheet(ws_out, out_rows)
+
+    buf = BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+LOG_HEADERS = ["Date", "Sender", "Type", "Body", "WhatsApp Message SID"]
+
+
+async def generate_message_log_workbook(start: date, end: date) -> bytes:
+    """Audit log — every raw inbound message in the period, regardless of whether
+    it became a ledger entry, a stock movement, or nothing at all. Who sent what,
+    when, for oversight/tamper-checking rather than the business data itself."""
+    messages = await get_messages_between(start, end)
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Message Log"
+    for col, header in enumerate(LOG_HEADERS, start=1):
+        ws.cell(row=1, column=col, value=header).font = BOLD
+
+    for r, m in enumerate(messages, start=2):
+        raw = m.get("raw_payload") or {}
+        ws.cell(row=r, column=1, value=m.get("created_at"))
+        ws.cell(row=r, column=2, value=m.get("sender_phone"))
+        ws.cell(row=r, column=3, value=m.get("message_type"))
+        ws.cell(row=r, column=4, value=m.get("body"))
+        ws.cell(row=r, column=5, value=raw.get("MessageSid"))
+
+    for col in range(1, len(LOG_HEADERS) + 1):
+        ws.column_dimensions[get_column_letter(col)].width = 22
 
     buf = BytesIO()
     wb.save(buf)

@@ -115,6 +115,25 @@ def test_deterministic_parsing():
     start, end = resolve_period("2026-05", reference=today)
     check("resolve_period explicit YYYY-MM", (start, end) == (date(2026, 5, 1), date(2026, 6, 1)))
 
+    from app.audit import parse_log_request
+    check(
+        "parse_log_request: correct password authorizes",
+        parse_log_request("send me this month logs password pineapple") == {"authorized": True, "period": "this_month"},
+    )
+    check(
+        "parse_log_request: wrong password rejected",
+        parse_log_request("send me this month logs password wrongword")["authorized"] is False,
+    )
+    check(
+        "parse_log_request: missing password rejected, not a crash",
+        parse_log_request("send me this month logs")["authorized"] is False,
+    )
+    check("parse_log_request: unrelated message is not an attempt", parse_log_request("ok thanks") is None)
+    check(
+        "parse_log_request: 'last month' phrasing sets the right period",
+        parse_log_request("send me last month logs password pineapple")["period"] == "last_month",
+    )
+
 
 # ── 3. Live Groq calls ──
 
@@ -325,6 +344,19 @@ def test_webhook_live():
                 r.text,
             )
 
+            r = post_webhook(client, "send me this month logs password pineapple")
+            check(
+                "correct-password log request acks immediately",
+                r.status_code == 200 and "generating the activity log" in r.text,
+                r.text,
+            )
+            r = post_webhook(client, "send me this month logs password wrongword")
+            check(
+                "wrong-password log request is rejected, not silently accepted",
+                r.status_code == 200 and "Incorrect password" in r.text,
+                r.text,
+            )
+
             api_key = os.getenv("API_ACCESS_KEY")
             r = client.get("/messages")
             check("GET /messages without API key -> 401", r.status_code == 401)
@@ -370,7 +402,7 @@ def cleanup():
     # The REPORT / report-request commands' background tasks regenerate this
     # month's report files for real during the live webhook test — remove them.
     month = date.today().strftime("%Y-%m")
-    for regenerated in (f"stock_{month}.xlsx", f"ledger_{month}.xlsx"):
+    for regenerated in (f"stock_{month}.xlsx", f"ledger_{month}.xlsx", f"messagelog_{month}.xlsx"):
         try:
             supabase.storage.from_("reports").remove([regenerated])
             print(f"  removed regenerated {regenerated}")

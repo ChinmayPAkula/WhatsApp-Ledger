@@ -27,6 +27,8 @@ services:
         sync: false
       - key: API_ACCESS_KEY
         sync: false
+      - key: AUDIT_LOG_PASSWORD
+        sync: false
 
   - type: cron
     name: whatsapp-ledger-monthly-report

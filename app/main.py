@@ -14,8 +14,9 @@ from twilio.request_validator import RequestValidator
 from app.database import save_message, get_recent_messages, save_entries, get_recent_entries, upload_report, save_stock_transaction
 from app.extract import extract_entries
 from app.intent import classify_intent
-from app.report import generate_report_workbook, generate_stock_report_workbook, resolve_period
+from app.report import generate_report_workbook, generate_stock_report_workbook, generate_message_log_workbook, resolve_period
 from app.stock import parse_stock_message, is_report_command
+from app.audit import parse_log_request
 
 load_dotenv()
 
@@ -104,6 +105,25 @@ async def send_stock_report_async(to_whatsapp: str, period: str | None):
         print(f"✅ Sent stock report to {to_whatsapp}")
     except Exception as e:
         print(f"⚠️  Failed to generate/send stock report: {e}")
+
+
+async def send_message_log_async(to_whatsapp: str, period: str | None):
+    """Same async-delivery pattern as the other reports, for the password-gated audit log."""
+    try:
+        start, end = resolve_period(period)
+        print(f"🔒 Generating message log for {start} to {end}...")
+        content = await generate_message_log_workbook(start, end)
+        filename = f"messagelog_{start.strftime('%Y-%m')}.xlsx"
+        signed_url = await upload_report(filename, content)
+        twilio_client.messages.create(
+            from_=os.getenv("TWILIO_WHATSAPP_FROM"),
+            to=to_whatsapp,
+            body=f"Here's the activity log for {start.strftime('%B %Y')}",
+            media_url=[signed_url],
+        )
+        print(f"✅ Sent message log to {to_whatsapp}")
+    except Exception as e:
+        print(f"⚠️  Failed to generate/send message log: {e}")
 
 
 # ── HEALTH CHECK ──
@@ -219,7 +239,26 @@ async def receive_twilio_message(
                 )
                 return Response(content=twiml, media_type="application/xml", background=background_tasks)
 
-        # Step 3: Classify intent, then route (Phase 3)
+        # Step 3: Password-gated audit log request — deliberately deterministic
+        # (no LLM involved in a security-sensitive check) and checked before the
+        # general intent classifier, same reasoning as the stock command fast path.
+        if msg_type == "text" and text.strip() and saved_message:
+            log_request = parse_log_request(text)
+            if log_request is not None:
+                if log_request["authorized"]:
+                    background_tasks.add_task(send_message_log_async, From, log_request["period"])
+                    twiml = (
+                        "<Response><Message>"
+                        "<Body>🔒 Got it — generating the activity log now, I'll send it in a moment.</Body>"
+                        "</Message></Response>"
+                    )
+                    return Response(content=twiml, media_type="application/xml", background=background_tasks)
+                else:
+                    print(f"⚠️  Log request with missing/incorrect password from {sender_phone}")
+                    twiml = "<Response><Message><Body>❌ Incorrect password.</Body></Message></Response>"
+                    return Response(content=twiml, media_type="application/xml")
+
+        # Step 4: Classify intent, then route (Phase 3)
         if msg_type == "text" and text.strip() and saved_message:
             intent_result = await classify_intent(text)
             intent = intent_result["intent"]

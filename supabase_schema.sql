@@ -46,3 +46,22 @@ alter table entries enable row level security;
 drop policy if exists "service role full access" on entries;
 create policy "service role full access"
   on entries for all using (true);
+
+create table if not exists stock_transactions (
+  id          uuid primary key default gen_random_uuid(),
+  message_id  uuid references messages(id) on delete cascade,
+  direction   text not null,          -- 'in' | 'out'
+  item        text not null,
+  quantity    numeric not null,
+  unit        text,                   -- "bags", "kg", "pieces"
+  created_at  timestamptz default now()
+);
+
+create index if not exists stock_transactions_item_idx    on stock_transactions (item);
+create index if not exists stock_transactions_created_idx on stock_transactions (created_at desc);
+
+alter table stock_transactions enable row level security;
+
+drop policy if exists "service role full access" on stock_transactions;
+create policy "service role full access"
+  on stock_transactions for all using (true);

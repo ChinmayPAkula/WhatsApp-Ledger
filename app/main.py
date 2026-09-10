@@ -11,10 +11,11 @@ from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 from twilio.rest import Client as TwilioClient
 from twilio.request_validator import RequestValidator
-from app.database import save_message, get_recent_messages, save_entries, get_recent_entries, upload_report
+from app.database import save_message, get_recent_messages, save_entries, get_recent_entries, upload_report, save_stock_transaction, get_stock_transactions_for_item
 from app.extract import extract_entries
 from app.intent import classify_intent
-from app.report import generate_report_workbook, resolve_period
+from app.report import generate_report_workbook, generate_stock_report_workbook, resolve_period
+from app.stock import parse_stock_command, parse_stock_command_llm, is_report_command
 
 load_dotenv()
 
@@ -71,6 +72,25 @@ async def send_report_async(to_whatsapp: str, period: str | None):
         print(f"✅ Sent report to {to_whatsapp}")
     except Exception as e:
         print(f"⚠️  Failed to generate/send report: {e}")
+
+
+async def send_stock_report_async(to_whatsapp: str, period: str | None):
+    """Same async-delivery pattern as send_report_async, for the stock IN/OUT report."""
+    try:
+        start, end = resolve_period(period)
+        print(f"📦 Generating stock report for {start} to {end}...")
+        content = await generate_stock_report_workbook(start, end)
+        filename = f"stock_{start.strftime('%Y-%m')}.xlsx"
+        signed_url = await upload_report(filename, content)
+        twilio_client.messages.create(
+            from_=os.getenv("TWILIO_WHATSAPP_FROM"),
+            to=to_whatsapp,
+            body=f"Here's your stock report for {start.strftime('%B %Y')}",
+            media_url=[signed_url],
+        )
+        print(f"✅ Sent stock report to {to_whatsapp}")
+    except Exception as e:
+        print(f"⚠️  Failed to generate/send stock report: {e}")
 
 
 # ── HEALTH CHECK ──
@@ -154,7 +174,52 @@ async def receive_twilio_message(
             },
         )
 
-        # Step 2: Classify intent, then route (Phase 3)
+        # Step 2: Stock commands (IN/OUT/REPORT) — a fixed, case-sensitive syntax checked
+        # before the general LLM intent classifier, so it never collides with ordinary
+        # lowercase chat. Quantity is always regex-extracted (never touched by the LLM);
+        # only the item name goes through Groq, for spelling correction.
+        if msg_type == "text" and text.strip() and saved_message:
+            stock_cmd = await parse_stock_command(text)
+            if stock_cmd is None and (text.startswith("IN ") or text.startswith("OUT ")):
+                stock_cmd = await parse_stock_command_llm(text)
+
+            if stock_cmd:
+                await save_stock_transaction(
+                    saved_message["id"], stock_cmd["direction"], stock_cmd["item"],
+                    stock_cmd["quantity"], stock_cmd["unit"],
+                )
+                history = await get_stock_transactions_for_item(stock_cmd["item"])
+                balance = sum(
+                    float(r["quantity"]) if r["direction"] == "in" else -float(r["quantity"])
+                    for r in history
+                )
+                unit = stock_cmd["unit"] or ""
+                if stock_cmd["direction"] == "in":
+                    reply = f"✅ Stock IN: {stock_cmd['item']} +{stock_cmd['quantity']:g}{unit} (balance: {balance:g}{unit})"
+                else:
+                    reply = f"📤 Stock OUT: {stock_cmd['item']} -{stock_cmd['quantity']:g}{unit} (balance: {balance:g}{unit})"
+                twiml = f"<Response><Message><Body>{xml_escape(reply)}</Body></Message></Response>"
+                return Response(content=twiml, media_type="application/xml")
+
+            elif text.startswith("IN ") or text.startswith("OUT "):
+                reply = "Couldn't read that stock command. Try: IN Cement 50 bags"
+                twiml = f"<Response><Message><Body>{xml_escape(reply)}</Body></Message></Response>"
+                return Response(content=twiml, media_type="application/xml")
+
+            elif is_report_command(text):
+                period = "this_month"
+                trailing = text.strip()[len("REPORT"):].strip().lower()
+                if "last month" in trailing:
+                    period = "last_month"
+                background_tasks.add_task(send_stock_report_async, From, period)
+                twiml = (
+                    "<Response><Message>"
+                    "<Body>📦 Got it — generating your stock report now, I'll send it in a moment.</Body>"
+                    "</Message></Response>"
+                )
+                return Response(content=twiml, media_type="application/xml", background=background_tasks)
+
+        # Step 3: Classify intent, then route (Phase 3)
         if msg_type == "text" and text.strip() and saved_message:
             intent_result = await classify_intent(text)
             intent = intent_result["intent"]

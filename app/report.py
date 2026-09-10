@@ -12,7 +12,12 @@ from openpyxl import Workbook
 from openpyxl.styles import Font
 from openpyxl.utils import get_column_letter
 
-from app.database import get_entries_between, get_entries_before
+from app.database import (
+    get_entries_between,
+    get_entries_before,
+    get_all_stock_transactions,
+    get_stock_transactions_between,
+)
 
 
 def resolve_period(period: str | None, reference: date = None) -> tuple[date, date]:
@@ -176,6 +181,62 @@ async def generate_report_workbook(start: date, end: date) -> bytes:
 
     for col in range(sc, sc + 7):
         ws.column_dimensions[get_column_letter(col)].width = 18
+
+    buf = BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+STOCK_MOVEMENT_HEADERS = ["Date", "Sender", "Item", "Quantity", "Unit"]
+
+
+def _write_movement_sheet(ws, rows: list[dict]):
+    for col, header in enumerate(STOCK_MOVEMENT_HEADERS, start=1):
+        ws.cell(row=1, column=col, value=header).font = BOLD
+    for r, row in enumerate(rows, start=2):
+        ws.cell(row=r, column=1, value=row.get("created_at"))
+        ws.cell(row=r, column=2, value=row.get("sender_phone"))
+        ws.cell(row=r, column=3, value=row.get("item"))
+        ws.cell(row=r, column=4, value=row.get("quantity"))
+        ws.cell(row=r, column=5, value=row.get("unit"))
+    for col in range(1, len(STOCK_MOVEMENT_HEADERS) + 1):
+        ws.column_dimensions[get_column_letter(col)].width = 18
+
+
+async def generate_stock_report_workbook(start: date, end: date) -> bytes:
+    all_time = await get_all_stock_transactions()
+    period_rows = await get_stock_transactions_between(start, end)
+
+    balance = defaultdict(lambda: {"in": 0.0, "out": 0.0, "unit": None})
+    for row in all_time:
+        key = (row.get("item") or "").strip().lower()
+        bucket = balance[key]
+        bucket["unit"] = bucket["unit"] or row.get("unit")
+        bucket[row["direction"]] += float(row["quantity"])
+
+    wb = Workbook()
+    ws_stock = wb.active
+    ws_stock.title = "Current Stock"
+    headers = ["Item", "Unit", "Total In", "Total Out", "Balance"]
+    for col, header in enumerate(headers, start=1):
+        ws_stock.cell(row=1, column=col, value=header).font = BOLD
+    for r, (item, b) in enumerate(sorted(balance.items()), start=2):
+        ws_stock.cell(row=r, column=1, value=item)
+        ws_stock.cell(row=r, column=2, value=b["unit"])
+        ws_stock.cell(row=r, column=3, value=b["in"])
+        ws_stock.cell(row=r, column=4, value=b["out"])
+        ws_stock.cell(row=r, column=5, value=b["in"] - b["out"])
+    for col in range(1, len(headers) + 1):
+        ws_stock.column_dimensions[get_column_letter(col)].width = 16
+
+    in_rows = [r for r in period_rows if r["direction"] == "in"]
+    out_rows = [r for r in period_rows if r["direction"] == "out"]
+
+    ws_in = wb.create_sheet("IN")
+    _write_movement_sheet(ws_in, in_rows)
+
+    ws_out = wb.create_sheet("OUT")
+    _write_movement_sheet(ws_out, out_rows)
 
     buf = BytesIO()
     wb.save(buf)

@@ -128,3 +128,60 @@ async def get_entries_before(before: date) -> list[dict]:
         .execute()
     )
     return result.data
+
+
+# ── STOCK TRANSACTIONS (IN / OUT ledger) ──
+
+async def save_stock_transaction(message_id: str, direction: str, item: str, quantity: float, unit: str | None) -> dict:
+    row = {
+        "message_id": message_id,
+        "direction": direction,
+        "item": item,
+        "quantity": quantity,
+        "unit": unit,
+    }
+    result = supabase.table("stock_transactions").insert(row).execute()
+    return result.data[0] if result.data else None
+
+
+async def get_stock_transactions_for_item(item: str) -> list[dict]:
+    """All movements for one item — used to compute the balance shown in the confirmation reply."""
+    result = (
+        supabase.table("stock_transactions")
+        .select("direction, quantity")
+        .eq("item", item)
+        .execute()
+    )
+    return result.data
+
+
+async def get_all_stock_transactions() -> list[dict]:
+    """Full history, joined to messages for sender_phone — used for the all-time Current Stock balance."""
+    result = (
+        supabase.table("stock_transactions")
+        .select("*, messages(sender_phone)")
+        .order("created_at", desc=False)
+        .execute()
+    )
+    rows = result.data
+    for row in rows:
+        message = row.pop("messages", None) or {}
+        row["sender_phone"] = message.get("sender_phone")
+    return rows
+
+
+async def get_stock_transactions_between(start: date, end: date) -> list[dict]:
+    """Period-scoped movements, joined to messages — for a report's IN/OUT sections."""
+    result = (
+        supabase.table("stock_transactions")
+        .select("*, messages(sender_phone)")
+        .gte("created_at", start.isoformat())
+        .lt("created_at", end.isoformat())
+        .order("created_at", desc=False)
+        .execute()
+    )
+    rows = result.data
+    for row in rows:
+        message = row.pop("messages", None) or {}
+        row["sender_phone"] = message.get("sender_phone")
+    return rows

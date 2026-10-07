@@ -183,10 +183,10 @@ async def get_stock_transactions_for_item(item: str) -> list[dict]:
 
 
 async def get_all_stock_transactions() -> list[dict]:
-    """Full history, joined to messages for sender_phone — used for the all-time Current Stock balance."""
+    """Full history, joined to messages for sender phone and name — used for the all-time Current Stock balance."""
     result = (
         supabase.table("stock_transactions")
-        .select("*, messages(sender_phone)")
+        .select("*, messages(sender_phone, raw_payload)")
         .order("created_at", desc=False)
         .execute()
     )
@@ -194,6 +194,7 @@ async def get_all_stock_transactions() -> list[dict]:
     for row in rows:
         message = row.pop("messages", None) or {}
         row["sender_phone"] = message.get("sender_phone")
+        row["sender_name"] = (message.get("raw_payload") or {}).get("ProfileName")
     return rows
 
 
@@ -201,7 +202,7 @@ async def get_stock_transactions_between(start: date, end: date) -> list[dict]:
     """Period-scoped movements, joined to messages — for a report's IN/OUT sections."""
     result = (
         supabase.table("stock_transactions")
-        .select("*, messages(sender_phone)")
+        .select("*, messages(sender_phone, raw_payload)")
         .gte("created_at", start.isoformat())
         .lt("created_at", end.isoformat())
         .order("created_at", desc=False)
@@ -211,4 +212,5 @@ async def get_stock_transactions_between(start: date, end: date) -> list[dict]:
     for row in rows:
         message = row.pop("messages", None) or {}
         row["sender_phone"] = message.get("sender_phone")
+        row["sender_name"] = (message.get("raw_payload") or {}).get("ProfileName")
     return rows

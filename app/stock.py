@@ -19,19 +19,55 @@ from app.canonicalize import get_known_items, canonicalize
 
 groq_client: Groq = _shared_client
 
-# Gate: does this message even look like an attempt at a stock command? Requires
-# "in"/"out" (any case) plus a digit somewhere — cheap, no LLM call, and specific
-# enough that ordinary sentences ("in the evening we ran out") never match, since
-# they don't also carry a bare quantity.
-STOCK_ATTEMPT_RE = re.compile(r"^(IN|OUT)\s.*\d", re.IGNORECASE | re.MULTILINE)
+# Gate: does this message even look like an attempt at a stock command? Two forms,
+# both deterministic (no LLM call) and both requiring a digit somewhere so ordinary
+# sentences ("in the evening we ran out") never match:
+#   - inline:  "IN Cement 50 bags" / "In: Milk 2 ltr"  (direction + item on one line)
+#   - header:  "In:" / "Out" alone on a line, with item lines ("Milk 2 ltr") below it
+# Horizontal whitespace only (space/tab, not \s) so a header can't swallow the line after it.
+STOCK_ATTEMPT_RE = re.compile(r"^[ \t]*(IN|OUT)(?:[ \t]*:|[ \t])[ \t]*.*\d", re.IGNORECASE | re.MULTILINE)
+STOCK_HEADER_RE = re.compile(r"^[ \t]*(IN|OUT)[ \t]*:?[ \t]*$", re.IGNORECASE)
+OTHER_HEADER_RE = re.compile(r"^[ \t]*[A-Za-z][A-Za-z ]*:[ \t]*$")
+
+
+def count_stock_attempts(text: str) -> int:
+    """How many lines look like an attempted stock movement: every inline
+    command, plus every item line (one containing a digit) under an In:/Out:
+    header. The block ends at the next header of any kind, e.g. "Order:"."""
+    attempted = 0
+    under_header = False
+    for line in text.splitlines():
+        if STOCK_HEADER_RE.match(line):
+            under_header = True
+        elif STOCK_ATTEMPT_RE.match(line):
+            attempted += 1
+            under_header = False
+        elif OTHER_HEADER_RE.match(line):
+            under_header = False
+        elif under_header and re.search(r"\d", line):
+            attempted += 1
+    return attempted
+
 
 EXTRACT_SYSTEM_PROMPT = """You extract stock movement commands from a WhatsApp message sent to
-a stock-tracking bot. The message may contain multiple lines, each usually starting with "IN" or
-"OUT" (any capitalization), meaning stock received or stock consumed, e.g.:
+a stock-tracking bot. "IN" means stock received, "OUT" means stock consumed (any capitalization).
+The message uses one of two layouts, possibly mixed:
 
+1. Direction on every line:
 IN Milk 2litres
 IN paneer 4kg
 Out mushroom 1kg
+
+2. A header line ("In:" or "Out:") alone on its own line. The header sets the direction for EVERY
+item line below it, until the next header:
+In:
+Milk 2 ltr
+Onion 5 kg
+Out:
+Curd 1 ltr
+Tomato 500 gms
+
+The second example is four movements: milk and onion are "in", curd and tomato are "out".
 
 For each such line/movement, extract:
 - direction: "in" or "out"
@@ -126,7 +162,7 @@ async def parse_stock_message(text: str) -> dict | None:
     couldn't be confidently read or failed verification."""
     if not text:
         return None
-    attempted = len(STOCK_ATTEMPT_RE.findall(text))
+    attempted = count_stock_attempts(text)
     if not attempted:
         return None
     commands = await extract_stock_movements(text)

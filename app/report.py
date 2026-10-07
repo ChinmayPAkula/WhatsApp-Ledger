@@ -4,7 +4,7 @@ plus a statistics block (total spend, spend by category, quantity by category,
 price change by item/vendor) offset to the right on the same sheet.
 """
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, timezone
 from io import BytesIO
 from collections import defaultdict
 
@@ -190,13 +190,30 @@ async def generate_report_workbook(start: date, end: date) -> bytes:
 
 STOCK_MOVEMENT_HEADERS = ["Date", "Sender", "Item", "Quantity", "Unit", "Remaining"]
 
+IST = timezone(timedelta(hours=5, minutes=30))
+
+
+def _format_ist(timestamp: str | None) -> str | None:
+    """Supabase stores UTC; the staff read the sheet in India, so show IST."""
+    if not timestamp:
+        return None
+    return datetime.fromisoformat(timestamp.replace("Z", "+00:00")).astimezone(IST).strftime("%Y-%m-%d %H:%M")
+
+
+def _sender_label(row: dict) -> str | None:
+    """'Ravi (+919876543210)' when WhatsApp gave us a profile name, else just the number."""
+    phone = row.get("sender_phone")
+    name = row.get("sender_name")
+    number = f"+{phone}" if phone else None
+    return f"{name} ({number})" if name and number else (number or name)
+
 
 def _write_movement_sheet(ws, rows: list[dict]):
     for col, header in enumerate(STOCK_MOVEMENT_HEADERS, start=1):
         ws.cell(row=1, column=col, value=header).font = BOLD
     for r, row in enumerate(rows, start=2):
-        ws.cell(row=r, column=1, value=row.get("created_at"))
-        ws.cell(row=r, column=2, value=row.get("sender_phone"))
+        ws.cell(row=r, column=1, value=_format_ist(row.get("created_at")))
+        ws.cell(row=r, column=2, value=_sender_label(row))
         ws.cell(row=r, column=3, value=row.get("item"))
         ws.cell(row=r, column=4, value=row.get("quantity"))
         ws.cell(row=r, column=5, value=row.get("unit"))
@@ -205,31 +222,38 @@ def _write_movement_sheet(ws, rows: list[dict]):
         ws.column_dimensions[get_column_letter(col)].width = 18
 
 
-async def generate_stock_report_workbook(start: date, end: date) -> bytes:
+async def generate_stock_report_workbook(start: date, end: date, requested_by: str | None = None) -> bytes:
     all_time = await get_all_stock_transactions()
     period_rows = await get_stock_transactions_between(start, end)
 
-    balance = defaultdict(lambda: {"in": 0.0, "out": 0.0, "unit": None})
-    for row in all_time:
+    balance = defaultdict(lambda: {"in": 0.0, "out": 0.0, "unit": None, "last_at": None, "last_by": None})
+    for row in all_time:  # ascending by time, so the last row per item wins
         key = (row.get("item") or "").strip().lower()
         bucket = balance[key]
         bucket["unit"] = bucket["unit"] or row.get("unit")
         bucket[row["direction"]] += float(row["quantity"])
+        bucket["last_at"] = _format_ist(row.get("created_at"))
+        bucket["last_by"] = _sender_label(row)
 
     wb = Workbook()
     ws_stock = wb.active
     ws_stock.title = "Current Stock"
-    headers = ["Item", "Unit", "Total In", "Total Out", "Balance"]
+    generated_at = datetime.now(IST).strftime("%Y-%m-%d %H:%M")
+    ws_stock.cell(row=1, column=1, value=f"Generated on {generated_at} IST · requested by {requested_by or 'scheduled report'}").font = BOLD
+    headers = ["Item", "Unit", "Total In", "Total Out", "Balance", "Last Updated", "Last Updated By"]
     for col, header in enumerate(headers, start=1):
-        ws_stock.cell(row=1, column=col, value=header).font = BOLD
-    for r, (item, b) in enumerate(sorted(balance.items()), start=2):
+        ws_stock.cell(row=3, column=col, value=header).font = BOLD
+    for r, (item, b) in enumerate(sorted(balance.items()), start=4):
         ws_stock.cell(row=r, column=1, value=item)
         ws_stock.cell(row=r, column=2, value=b["unit"])
         ws_stock.cell(row=r, column=3, value=b["in"])
         ws_stock.cell(row=r, column=4, value=b["out"])
         ws_stock.cell(row=r, column=5, value=b["in"] - b["out"])
+        ws_stock.cell(row=r, column=6, value=b["last_at"])
+        ws_stock.cell(row=r, column=7, value=b["last_by"])
     for col in range(1, len(headers) + 1):
-        ws_stock.column_dimensions[get_column_letter(col)].width = 16
+        ws_stock.column_dimensions[get_column_letter(col)].width = 18
+    ws_stock.column_dimensions["G"].width = 30
 
     in_rows = [r for r in period_rows if r["direction"] == "in"]
     out_rows = [r for r in period_rows if r["direction"] == "out"]

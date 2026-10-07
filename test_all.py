@@ -89,6 +89,21 @@ def test_deterministic_parsing():
         len(STOCK_ATTEMPT_RE.findall("IN Milk 2litres\nIN paneer 4kg\nIn potato 2kg\nOut mushroom 1kg")) == 4,
     )
 
+    from app.stock import count_stock_attempts
+    in_out = "In:\nMilk 2 ltr\nOnion 5 kg\nCurd 2 ltr\nTomato 2 kg\n\nOut:\nCurd 1 ltr\nMilk 1 ltr\nTomato 500 gms\nOnion 1.5 kg"
+    check("header format: In:/Out: blocks count every item line", count_stock_attempts(in_out) == 8, str(count_stock_attempts(in_out)))
+    check("header format: header without colon works", count_stock_attempts("OUT\nCurd 1 ltr") == 1)
+    check("header format: inline 'In: Milk 2 ltr' counts once", count_stock_attempts("In: Milk 2 ltr") == 1)
+    check("header format: legacy per-line format still counts", count_stock_attempts("IN Milk 2litres\nOut mushroom 1kg") == 2)
+    check("header format: a header with no items is not an attempt", count_stock_attempts("In:") == 0)
+    check("header format: Order: block after In: is not counted as stock", count_stock_attempts("In:\nMilk 2 ltr\nOrder:\nOnion 5 kg") == 1)
+    check("header format: ordinary chat is not an attempt", count_stock_attempts("in the evening we ran out") == 0)
+
+    from app.report import _format_ist, _sender_label
+    check("report: UTC timestamp shown in IST", _format_ist("2026-10-07T10:00:00+00:00") == "2026-10-07 15:30")
+    check("report: sender label with profile name", _sender_label({"sender_phone": "919876543210", "sender_name": "Ravi"}) == "Ravi (+919876543210)")
+    check("report: sender label without profile name", _sender_label({"sender_phone": "919876543210", "sender_name": None}) == "+919876543210")
+
     check("quantity cross-check: exact match found", _quantity_verified_in_text(50, "IN cement 50 bags"))
     check("quantity cross-check: decimal match found", _quantity_verified_in_text(2.5, "IN oil 2.5 litres"))
     check("quantity cross-check: hallucinated number rejected", not _quantity_verified_in_text(999, "IN cement 50 bags"))
@@ -184,6 +199,15 @@ async def test_groq():
         str(r),
     )
 
+    r = await extract_stock_movements("In:\nMilk 2 ltr\nOnion 5 kg\nCurd 2 ltr\nTomato 2 kg\n\nOut:\nCurd 1 ltr\nMilk 1 ltr\nTomato 500 gms\nOnion 1.5 kg")
+    ins = sorted(m["item"] for m in r if m["direction"] == "in")
+    outs = sorted(m["item"] for m in r if m["direction"] == "out")
+    check(
+        "extract_stock_movements: In:/Out: header blocks set direction for every line below",
+        ins == ["curd", "milk", "onion", "tomato"] and outs == ["curd", "milk", "onion", "tomato"],
+        str(r),
+    )
+
     r = await extract_stock_movements("IN blah blah nonsense")
     check("extract_stock_movements: no quantity present -> nothing extracted", len(r) == 0, str(r))
 
@@ -218,6 +242,27 @@ async def test_reports():
         )
     except Exception as e:
         check("generate_stock_report_workbook produces a valid .xlsx", False, str(e))
+
+    try:
+        content = await generate_stock_report_workbook(start, end, requested_by="+919999999999")
+        ws = load_workbook(BytesIO(content))["Current Stock"]
+        check(
+            "stock report: Current Stock shows generation time and requester",
+            "requested by +919999999999" in str(ws["A1"].value) and "IST" in str(ws["A1"].value),
+            str(ws["A1"].value),
+        )
+        check(
+            "stock report: Current Stock has Last Updated / Last Updated By columns",
+            [c.value for c in ws[3]][5:7] == ["Last Updated", "Last Updated By"],
+            str([c.value for c in ws[3]]),
+        )
+        content = await generate_stock_report_workbook(start, end)
+        check(
+            "stock report: no requester (cron) says 'scheduled report'",
+            "scheduled report" in str(load_workbook(BytesIO(content))["Current Stock"]["A1"].value),
+        )
+    except Exception as e:
+        check("stock report: new Current Stock columns", False, str(e))
 
     try:
         test_filename = f"{TEST_TAG}_upload_check.xlsx"

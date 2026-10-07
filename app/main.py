@@ -94,7 +94,7 @@ async def send_stock_report_async(to_whatsapp: str, period: str | None):
     try:
         start, end = resolve_period(period)
         print(f"📦 Generating stock report for {start} to {end}...")
-        content = await generate_stock_report_workbook(start, end)
+        content = await generate_stock_report_workbook(start, end, requested_by="+" + to_whatsapp.replace("whatsapp:", "").lstrip("+"))
         filename = f"stock_{start.strftime('%Y-%m')}.xlsx"
         signed_url = await upload_report(filename, content)
         twilio_client.messages.create(
@@ -219,7 +219,7 @@ async def receive_twilio_message(
             if stock_msg is not None:
                 reply_lines = [await apply_stock_command(saved_message["id"], cmd) for cmd in stock_msg["commands"]]
                 if not reply_lines:
-                    reply = "Couldn't read that stock command. Try: IN Cement 50 bags"
+                    reply = "Couldn't read that stock command. Try:\nIn:\nMilk 2 ltr\nOnion 5 kg"
                 else:
                     reply = "\n".join(reply_lines)
                     if len(stock_msg["commands"]) < stock_msg["attempted"]:

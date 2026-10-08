@@ -16,6 +16,7 @@ import json
 from groq import Groq
 from app.extract import groq_client as _shared_client
 from app.canonicalize import get_known_items, canonicalize
+from app.units import normalize_quantity
 
 groq_client: Groq = _shared_client
 
@@ -133,11 +134,15 @@ async def extract_stock_movements(text: str) -> list[dict]:
         if not _quantity_verified_in_text(quantity, text):
             print(f"⚠️  Rejected stock movement (quantity not found verbatim in message): {m}")
             continue
+        # Convert only after the verbatim check above — it must see the number as
+        # written ("500"), not the converted one ("0.5").
+        qty, unit, converted_from = normalize_quantity(float(quantity), m.get("unit"))
         verified.append({
             "direction": direction,
             "item": str(item).strip().lower(),
-            "quantity": float(quantity),
-            "unit": m.get("unit"),
+            "quantity": qty,
+            "unit": unit,
+            "converted_from": converted_from,
         })
 
     # Snap each item onto an existing stock item name if one's a close match,

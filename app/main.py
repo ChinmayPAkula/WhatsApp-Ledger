@@ -11,7 +11,8 @@ from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 from twilio.rest import Client as TwilioClient
 from twilio.request_validator import RequestValidator
-from app.database import save_message, get_recent_messages, save_entries, get_recent_entries, upload_report, save_stock_transaction, save_order, get_last_order
+from app.database import save_message, get_recent_messages, save_entries, get_recent_entries, upload_report, save_stock_transaction, save_order, get_last_order, get_item_unit
+from app.units import canonical_unit
 from app.extract import extract_entries
 from app.intent import classify_intent
 from app.report import generate_report_workbook, generate_stock_report_workbook, generate_message_log_workbook, resolve_period
@@ -60,13 +61,28 @@ async def apply_stock_command(message_id: str, cmd: dict) -> str:
     """Saves one stock movement and returns its confirmation line. The running
     balance comes straight from the row's stored `remaining` snapshot, computed
     once at insert time — no need to re-sum the whole history on every read."""
+    tracked_unit = canonical_unit(await get_item_unit(cmd["item"]))
+
+    # No unit given: ask for one rather than guess — a bare number could be kg,
+    # grams or litres, and a wrong guess would silently corrupt the balance.
+    if not cmd["unit"]:
+        return (f"⚠️ Not logged: {cmd['item']} {cmd['quantity']:g} has no unit. "
+                f"Please resend with a unit, e.g. \"{cmd['item']} {cmd['quantity']:g} {tracked_unit or 'kg'}\".")
+
+    # Refuse (rather than silently mix) a movement in a unit that can't be converted
+    # onto the one this item is already tracked in — e.g. "packets" for a litre item.
+    if tracked_unit and cmd["unit"] != tracked_unit:
+        return (f"⚠️ Not logged: {cmd['item']} is tracked in {tracked_unit}, but you sent "
+                f"{cmd['quantity']:g}{cmd['unit']}. Please resend in {tracked_unit}.")
+
     saved = await save_stock_transaction(message_id, cmd["direction"], cmd["item"], cmd["quantity"], cmd["unit"])
     balance = saved["remaining"] if saved else None
     unit = cmd["unit"] or ""
     balance_str = f"{balance:g}{unit}" if balance is not None else "unknown"
+    converted = f" — converted from {cmd['converted_from']}" if cmd.get("converted_from") else ""
     if cmd["direction"] == "in":
-        return f"✅ Stock IN: {cmd['item']} +{cmd['quantity']:g}{unit} (balance: {balance_str})"
-    return f"📤 Stock OUT: {cmd['item']} -{cmd['quantity']:g}{unit} (balance: {balance_str})"
+        return f"✅ Stock IN: {cmd['item']} +{cmd['quantity']:g}{unit} (balance: {balance_str}){converted}"
+    return f"📤 Stock OUT: {cmd['item']} -{cmd['quantity']:g}{unit} (balance: {balance_str}){converted}"
 
 
 async def send_report_async(to_whatsapp: str, period: str | None):
@@ -251,11 +267,19 @@ async def receive_twilio_message(
                 if not order_msg["items"]:
                     reply = "Couldn't read that order. Try:\nOrder:\nMilk 2 ltr\nOnion 5 kg"
                 else:
-                    previous = [await get_last_order(i["item"]) for i in order_msg["items"]]
-                    for i in order_msg["items"]:
+                    # Same no-guessing rule as stock: an item without a unit is
+                    # sent back for a unit instead of being logged.
+                    items = [i for i in order_msg["items"] if i["unit"]]
+                    no_unit = [i for i in order_msg["items"] if not i["unit"]]
+                    previous = [await get_last_order(i["item"]) for i in items]
+                    for i in items:
                         await save_order(saved_message["id"], i["item"], i["quantity"], i["unit"])
-                    lines = [format_last_ordered(i, last) for i, last in zip(order_msg["items"], previous)]
-                    reply = "🛒 Order logged:\n" + "\n".join(lines)
+                    lines = [format_last_ordered(i, last) for i, last in zip(items, previous)]
+                    reply = "🛒 Order logged:\n" + "\n".join(lines) if lines else ""
+                    for i in no_unit:
+                        reply += ("\n" if reply else "") + (
+                            f"⚠️ Not logged: {i['item']} {i['quantity']:g} has no unit. "
+                            f"Please resend with a unit, e.g. \"{i['item']} {i['quantity']:g} kg\".")
                     if len(order_msg["items"]) < order_msg["attempted"]:
                         reply += "\n⚠️ Some lines couldn't be confidently read — please check and resend those."
                 twiml = f"<Response><Message><Body>{xml_escape(reply)}</Body></Message></Response>"

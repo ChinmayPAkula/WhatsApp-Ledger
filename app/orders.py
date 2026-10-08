@@ -14,6 +14,7 @@ from datetime import datetime
 from groq import Groq
 from app.extract import groq_client as _shared_client
 from app.canonicalize import get_known_items, canonicalize
+from app.units import normalize_quantity
 from app.stock import STOCK_HEADER_RE, OTHER_HEADER_RE, _quantity_verified_in_text
 from app.report import IST, _sender_label
 
@@ -98,7 +99,8 @@ async def extract_order_items(text: str) -> list[dict]:
         if not _quantity_verified_in_text(quantity, text):
             print(f"⚠️  Rejected order item (quantity not found verbatim in message): {m}")
             continue
-        verified.append({"item": str(item).strip().lower(), "quantity": float(quantity), "unit": m.get("unit")})
+        qty, unit, _ = normalize_quantity(float(quantity), m.get("unit"))
+        verified.append({"item": str(item).strip().lower(), "quantity": qty, "unit": unit})
 
     if verified:
         known_items = await get_known_items("orders")

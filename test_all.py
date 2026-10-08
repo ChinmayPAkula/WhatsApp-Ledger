@@ -118,6 +118,16 @@ def test_deterministic_parsing():
     line = format_last_ordered({"item": "milk", "quantity": 2.0, "unit": "ltr"}, last, now=datetime(2026, 10, 8, 12, 0, tzinfo=timezone.utc))
     check("orders: last-ordered line shows date, days ago and who", line == "Milk 2ltr — last ordered 03 Oct (5 days ago) by Ravi (+919876543210)", line)
 
+    from app.units import normalize_quantity, canonical_unit
+    check("units: 500 gms -> 0.5 kg with a conversion note", normalize_quantity(500, "gms") == (0.5, "kg", "500 gms"), str(normalize_quantity(500, "gms")))
+    check("units: 250 g -> 0.25 kg", normalize_quantity(250, "g")[:2] == (0.25, "kg"))
+    check("units: 1500 ml -> 1.5 ltr", normalize_quantity(1500, "ml")[:2] == (1.5, "ltr"))
+    check("units: 'litres' respelled to ltr with no conversion note", normalize_quantity(2, "Litres") == (2, "ltr", None))
+    check("units: 'kgs' respelled to kg", normalize_quantity(5, "kgs") == (5, "kg", None))
+    check("units: unknown unit passes through lowercased", normalize_quantity(50, "Bags") == (50, "bags", None))
+    check("units: missing unit stays None", normalize_quantity(3, None) == (3, None, None))
+    check("units: canonical_unit respells but never converts", canonical_unit("Gms") == "kg" and canonical_unit("packets") == "packets" and canonical_unit(None) is None)
+
     check("quantity cross-check: exact match found", _quantity_verified_in_text(50, "IN cement 50 bags"))
     check("quantity cross-check: decimal match found", _quantity_verified_in_text(2.5, "IN oil 2.5 litres"))
     check("quantity cross-check: hallucinated number rejected", not _quantity_verified_in_text(999, "IN cement 50 bags"))
@@ -227,6 +237,14 @@ async def test_groq():
     check(
         "extract_order_items: PDF sample extracts 4 items with exact quantities",
         sorted((m["item"], m["quantity"]) for m in r) == [("curd", 2.0), ("milk", 2.0), ("onion", 5.0), ("tomato", 2.0)],
+        str(r),
+    )
+
+    r = await extract_stock_movements("Out:\nTomato 500 gms\nOnion 1.5 kg")
+    tomato = next((m for m in r if m["item"] == "tomato"), {})
+    check(
+        "extract_stock_movements: 500 gms is converted to 0.5 kg after the verbatim check",
+        tomato.get("quantity") == 0.5 and tomato.get("unit") == "kg" and tomato.get("converted_from") == "500 gms",
         str(r),
     )
 
@@ -408,7 +426,49 @@ def test_webhook_live():
                 r.status_code == 200 and "last ordered" in r.text and "today" in r.text and TEST_SENDER in r.text,
                 r.text,
             )
+            # Unit conversion + mismatch refusal, on an item unlikely to exist in real data.
+            r = post_webhook(client, "In:\nCardamom 2 kg")
+            check("stock IN in kg logs a kg balance", r.status_code == 200 and "balance: 2kg" in r.text, r.text)
+            r = post_webhook(client, "Out:\nCardamom 500 gms")
+            check(
+                "stock OUT in gms is converted to kg against the same balance",
+                r.status_code == 200 and "-0.5kg" in r.text and "balance: 1.5kg" in r.text and "converted from 500 gms" in r.text,
+                r.text,
+            )
+            r = post_webhook(client, "In:\nCardamom 3 packets")
+            check(
+                "unconvertible unit mismatch is refused, not mixed into the balance",
+                r.status_code == 200 and "Not logged" in r.text and "tracked in kg" in r.text,
+                r.text,
+            )
+
+            r = post_webhook(client, "In:\nCardamom 3")
+            check(
+                "stock line with no unit is refused with a request for one (no guessing)",
+                r.status_code == 200 and "Not logged" in r.text and "has no unit" in r.text and "kg" in r.text,
+                r.text,
+            )
+            r = post_webhook(client, "Out:\nCardamom 1 kg")
+            check("balance is untouched by the refused unitless line", r.status_code == 200 and "balance: 0.5kg" in r.text, r.text)
+
+            r = post_webhook(client, "Order:\nDragonfruit 3")
+            check(
+                "order line with no unit is refused with a request for one",
+                r.status_code == 200 and "has no unit" in r.text and "Order logged" not in r.text,
+                r.text,
+            )
+            r = post_webhook(client, "Order:\nDragonfruit 2 kg\nMilk 4")
+            check(
+                "mixed order logs the line with a unit and refuses the one without",
+                r.status_code == 200 and "Order logged" in r.text and "Dragonfruit" in r.text and "milk 4 has no unit" in r.text,
+                r.text,
+            )
+
             r = post_webhook(client, "Order:")
+            # The webhook allows 20 requests/minute per IP and this run now sends
+            # more than that before the report checks — wait out the window so
+            # the later checks aren't rejected by the app's own rate limiter.
+            time.sleep(61)
             check(
                 "'Order:' with no items falls through (not a stock/order attempt)",
                 r.status_code == 200 and "Order logged" not in r.text,

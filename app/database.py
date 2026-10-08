@@ -242,3 +242,19 @@ async def save_order(message_id: str, item: str, quantity: float, unit: str | No
     row = {"message_id": message_id, "item": item, "quantity": quantity, "unit": unit}
     result = supabase.table("orders").insert(row).execute()
     return result.data[0] if result.data else None
+
+
+async def get_item_unit(item: str) -> str | None:
+    """The unit this item's stock is already tracked in (its most recent movement
+    that recorded one), or None if the item is new — used to refuse a movement
+    in a different, unconvertible unit rather than silently mixing the balance."""
+    result = (
+        supabase.table("stock_transactions")
+        .select("unit")
+        .eq("item", item)
+        .not_.is_("unit", "null")
+        .order("created_at", desc=True)
+        .limit(1)
+        .execute()
+    )
+    return result.data[0]["unit"] if result.data else None

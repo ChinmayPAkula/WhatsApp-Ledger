@@ -128,6 +128,16 @@ def test_deterministic_parsing():
     check("units: missing unit stays None", normalize_quantity(3, None) == (3, None, None))
     check("units: canonical_unit respells but never converts", canonical_unit("Gms") == "kg" and canonical_unit("packets") == "packets" and canonical_unit(None) is None)
 
+    from app.report_keywords import match_report_keyword
+    check("keywords: 'Order Report' -> order", (match_report_keyword("Order Report") or {}).get("kind") == "order")
+    check("keywords: 'Get Order Report' (any case) -> order", (match_report_keyword("get ORDER report") or {}).get("kind") == "order")
+    check("keywords: 'Get Stock Report' -> stock, this month", match_report_keyword("Get Stock Report") == {"kind": "stock", "period": "this_month"})
+    check("keywords: 'Stock Report last month' -> stock, last month", match_report_keyword("Stock Report last month") == {"kind": "stock", "period": "last_month"})
+    check("keywords: 'Items Report' and 'Item Report' -> items", all((match_report_keyword(t) or {}).get("kind") == "items" for t in ("Items Report", "get item report")))
+    check("keywords: trailing full stop is tolerated", (match_report_keyword("Order Report.") or {}).get("kind") == "order")
+    check("keywords: a sentence merely mentioning a report is not a keyword", match_report_keyword("please send the order report to me") is None)
+    check("keywords: 'Order:' block is not a report keyword", match_report_keyword("Order:\nMilk 2 ltr") is None)
+
     check("quantity cross-check: exact match found", _quantity_verified_in_text(50, "IN cement 50 bags"))
     check("quantity cross-check: decimal match found", _quantity_verified_in_text(2.5, "IN oil 2.5 litres"))
     check("quantity cross-check: hallucinated number rejected", not _quantity_verified_in_text(999, "IN cement 50 bags"))
@@ -475,6 +485,54 @@ def test_webhook_live():
                 r.text,
             )
 
+            r = post_webhook(client, "Order Report")
+            check(
+                "'Order Report' keyword acks the order report immediately",
+                r.status_code == 200 and "generating your order report" in r.text,
+                r.text,
+            )
+            r = post_webhook(client, "Get Stock Report")
+            check(
+                "'Get Stock Report' keyword acks the stock report immediately",
+                r.status_code == 200 and "generating your stock report" in r.text,
+                r.text,
+            )
+            r = post_webhook(client, "Items Report")
+            check(
+                "'Items Report' says it isn't available yet instead of sending the wrong report",
+                r.status_code == 200 and "isn't available yet" in r.text and "generating" not in r.text,
+                r.text,
+            )
+
+            # Order report contents: the orders logged above must show up, newest first,
+            # attributed to the test sender, and be summarised per item.
+            from app.report import generate_order_report_workbook
+            from openpyxl import load_workbook
+            from io import BytesIO
+            wb = load_workbook(BytesIO(asyncio.run(generate_order_report_workbook(requested_by="+919999999999"))))
+            ws = wb["Orders"]
+            data = [[c.value for c in row] for row in ws.iter_rows(min_row=4)]
+            dragon = [row for row in data if row[2] == "dragonfruit"]
+            dates = [row[0] for row in data]
+            check(
+                "order report: sheets and header line are right",
+                wb.sheetnames == ["Orders", "Item Summary"] and "requested by +919999999999" in str(ws["A1"].value)
+                and [c.value for c in ws[3]] == ["Date", "Ordered By", "Item", "Quantity", "Unit"],
+                f"{wb.sheetnames} {ws['A1'].value}",
+            )
+            check(
+                "order report: logged orders appear attributed to the sender",
+                len(dragon) >= 2 and all(TEST_SENDER in str(row[1]) for row in dragon),
+                str(dragon),
+            )
+            check("order report: rows are newest first", dates == sorted(dates, reverse=True), str(dates[:5]))
+            summary = {row[0].value: [c.value for c in row] for row in wb["Item Summary"].iter_rows(min_row=2)}
+            check(
+                "order report: item summary counts orders and shows who last ordered",
+                summary.get("dragonfruit", [None, None, 0])[2] >= 2 and TEST_SENDER in str(summary["dragonfruit"][5]),
+                str(summary.get("dragonfruit")),
+            )
+
             r = post_webhook(client, "REPORT")
             check(
                 "REPORT command acks immediately (async delivery not tested here)",
@@ -560,7 +618,7 @@ def cleanup():
     # The REPORT / report-request commands' background tasks regenerate this
     # month's report files for real during the live webhook test — remove them.
     month = date.today().strftime("%Y-%m")
-    for regenerated in (f"stock_{month}.xlsx", f"ledger_{month}.xlsx", f"messagelog_{month}.xlsx"):
+    for regenerated in (f"stock_{month}.xlsx", f"ledger_{month}.xlsx", f"messagelog_{month}.xlsx", f"orders_{date.today().isoformat()}.xlsx"):
         try:
             supabase.storage.from_("reports").remove([regenerated])
             print(f"  removed regenerated {regenerated}")

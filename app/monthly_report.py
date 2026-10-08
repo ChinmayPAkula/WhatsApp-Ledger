@@ -8,11 +8,12 @@ Run with: python -m app.monthly_report
 
 import os
 import asyncio
+from datetime import date
 from dotenv import load_dotenv
 from twilio.rest import Client
 
 from app.database import upload_report
-from app.report import generate_report_workbook, generate_stock_report_workbook, resolve_period
+from app.report import generate_report_workbook, generate_stock_report_workbook, generate_order_report_workbook, resolve_period
 from app.notify import get_recipients
 
 load_dotenv()
@@ -32,6 +33,10 @@ async def main():
     stock_content = await generate_stock_report_workbook(start, end)
     stock_url = await upload_report(f"stock_{start.strftime('%Y-%m')}.xlsx", stock_content)
 
+    print("🛒 Generating order report (all orders to date)...")
+    order_content = await generate_order_report_workbook()
+    order_url = await upload_report(f"orders_{date.today().isoformat()}.xlsx", order_content)
+
     for recipient in recipients:
         ledger_msg = client.messages.create(
             from_=from_number,
@@ -48,6 +53,14 @@ async def main():
             media_url=[stock_url],
         )
         print(f"✅ Sent monthly stock report to {recipient}, SID={stock_msg.sid}")
+
+        order_msg = client.messages.create(
+            from_=from_number,
+            to=recipient,
+            body=f"🛒 Order report — all orders to date, as of {date.today().strftime('%d %B %Y')}",
+            media_url=[order_url],
+        )
+        print(f"✅ Sent order report to {recipient}, SID={order_msg.sid}")
 
 
 if __name__ == "__main__":

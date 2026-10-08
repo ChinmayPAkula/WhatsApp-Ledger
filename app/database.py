@@ -258,3 +258,27 @@ async def get_item_unit(item: str) -> str | None:
         .execute()
     )
     return result.data[0]["unit"] if result.data else None
+
+
+async def get_all_orders() -> list[dict]:
+    """Every order ever logged, newest first, joined to messages for who placed
+    it. Paged because Supabase caps a single query at 1000 rows and this is an
+    all-time report that will outgrow that."""
+    rows: list[dict] = []
+    page_size = 1000
+    while True:
+        result = (
+            supabase.table("orders")
+            .select("*, messages(sender_phone, raw_payload)")
+            .order("created_at", desc=True)
+            .range(len(rows), len(rows) + page_size - 1)
+            .execute()
+        )
+        rows.extend(result.data)
+        if len(result.data) < page_size:
+            break
+    for row in rows:
+        message = row.pop("messages", None) or {}
+        row["sender_phone"] = message.get("sender_phone")
+        row["sender_name"] = (message.get("raw_payload") or {}).get("ProfileName")
+    return rows

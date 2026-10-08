@@ -15,7 +15,8 @@ from app.database import save_message, get_recent_messages, save_entries, get_re
 from app.units import canonical_unit
 from app.extract import extract_entries
 from app.intent import classify_intent
-from app.report import generate_report_workbook, generate_stock_report_workbook, generate_message_log_workbook, resolve_period
+from app.report import generate_report_workbook, generate_stock_report_workbook, generate_message_log_workbook, generate_order_report_workbook, resolve_period
+from app.report_keywords import match_report_keyword
 from app.stock import parse_stock_message, is_report_command
 from app.orders import parse_order_message, format_last_ordered
 from app.audit import parse_log_request
@@ -142,6 +143,23 @@ async def send_message_log_async(to_whatsapp: str, period: str | None):
         print(f"✅ Sent message log to {to_whatsapp}")
     except Exception as e:
         print(f"⚠️  Failed to generate/send message log: {e}")
+
+
+async def send_order_report_async(to_whatsapp: str):
+    """Same async-delivery pattern as the other reports, for the all-time order report."""
+    try:
+        print("🛒 Generating order report...")
+        content = await generate_order_report_workbook(requested_by="+" + to_whatsapp.replace("whatsapp:", "").lstrip("+"))
+        signed_url = await upload_report(f"orders_{date.today().isoformat()}.xlsx", content)
+        twilio_client.messages.create(
+            from_=os.getenv("TWILIO_WHATSAPP_FROM"),
+            to=to_whatsapp,
+            body="Here's your order report (all orders to date)",
+            media_url=[signed_url],
+        )
+        print(f"✅ Sent order report to {to_whatsapp}")
+    except Exception as e:
+        print(f"⚠️  Failed to generate/send order report: {e}")
 
 
 # ── HEALTH CHECK ──
@@ -284,6 +302,27 @@ async def receive_twilio_message(
                         reply += "\n⚠️ Some lines couldn't be confidently read — please check and resend those."
                 twiml = f"<Response><Message><Body>{xml_escape(reply)}</Body></Message></Response>"
                 return Response(content=twiml, media_type="application/xml")
+
+        # Step 2c: Exact report keywords ("Stock Report", "Order Report", with an
+        # optional "Get") — deterministic, so they never depend on the LLM
+        # classifier. "Items Report" is recognised but not built yet (no items
+        # table); it gets an explicit reply rather than falling through, where the
+        # LLM classifier would guess and send the wrong report.
+        if msg_type == "text" and text.strip() and saved_message:
+            keyword = match_report_keyword(text)
+            if keyword and keyword["kind"] == "items":
+                reply = "📋 The items report isn't available yet."
+                twiml = f"<Response><Message><Body>{xml_escape(reply)}</Body></Message></Response>"
+                return Response(content=twiml, media_type="application/xml")
+            if keyword and keyword["kind"] in ("stock", "order"):
+                if keyword["kind"] == "order":
+                    background_tasks.add_task(send_order_report_async, From)
+                    ack = "🛒 Got it — generating your order report now, I'll send it in a moment."
+                else:
+                    background_tasks.add_task(send_stock_report_async, From, keyword["period"])
+                    ack = "📦 Got it — generating your stock report now, I'll send it in a moment."
+                twiml = f"<Response><Message><Body>{ack}</Body></Message></Response>"
+                return Response(content=twiml, media_type="application/xml", background=background_tasks)
 
         # Step 3: Password-gated audit log request — deliberately deterministic
         # (no LLM involved in a security-sensitive check) and checked before the

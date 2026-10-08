@@ -18,6 +18,7 @@ from app.database import (
     get_all_stock_transactions,
     get_stock_transactions_between,
     get_messages_between,
+    get_all_orders,
 )
 
 
@@ -294,6 +295,63 @@ async def generate_message_log_workbook(start: date, end: date) -> bytes:
 
     for col in range(1, len(LOG_HEADERS) + 1):
         ws.column_dimensions[get_column_letter(col)].width = 22
+
+    buf = BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+ORDER_HEADERS = ["Date", "Ordered By", "Item", "Quantity", "Unit"]
+ORDER_SUMMARY_HEADERS = ["Item", "Unit", "Times Ordered", "Total Quantity", "Last Ordered", "Last Ordered By", "First Ordered"]
+
+
+async def generate_order_report_workbook(requested_by: str | None = None) -> bytes:
+    """All orders to date, newest first, plus a per-item summary (how often each
+    item is ordered and when it was last ordered) for spotting odd ordering
+    frequency. Not month-scoped: the requirement is 'all orders made till date'."""
+    orders = await get_all_orders()  # already newest first
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Orders"
+    generated_at = datetime.now(IST).strftime("%Y-%m-%d %H:%M")
+    ws.cell(row=1, column=1, value=f"Generated on {generated_at} IST · requested by {requested_by or 'scheduled report'}").font = BOLD
+    for col, header in enumerate(ORDER_HEADERS, start=1):
+        ws.cell(row=3, column=col, value=header).font = BOLD
+    for r, row in enumerate(orders, start=4):
+        ws.cell(row=r, column=1, value=_format_ist(row.get("created_at")))
+        ws.cell(row=r, column=2, value=_sender_label(row))
+        ws.cell(row=r, column=3, value=row.get("item"))
+        ws.cell(row=r, column=4, value=row.get("quantity"))
+        ws.cell(row=r, column=5, value=row.get("unit"))
+    for col in range(1, len(ORDER_HEADERS) + 1):
+        ws.column_dimensions[get_column_letter(col)].width = 20
+    ws.column_dimensions["B"].width = 30
+
+    # One row per (item, unit): the same item ordered in different units stays
+    # separate rather than summing quantities that aren't comparable.
+    summary: dict[tuple, dict] = {}
+    for row in orders:  # newest first, so the first row seen is the last order
+        key = ((row.get("item") or "").strip().lower(), row.get("unit"))
+        s = summary.setdefault(key, {"count": 0, "total": 0.0, "last_at": row.get("created_at"), "last_by": _sender_label(row)})
+        s["count"] += 1
+        s["total"] += float(row["quantity"])
+        s["first_at"] = row.get("created_at")  # overwritten each time, ends on the oldest
+
+    ws_sum = wb.create_sheet("Item Summary")
+    for col, header in enumerate(ORDER_SUMMARY_HEADERS, start=1):
+        ws_sum.cell(row=1, column=col, value=header).font = BOLD
+    for r, ((item, unit), s) in enumerate(sorted(summary.items(), key=lambda kv: kv[1]["last_at"] or "", reverse=True), start=2):
+        ws_sum.cell(row=r, column=1, value=item)
+        ws_sum.cell(row=r, column=2, value=unit)
+        ws_sum.cell(row=r, column=3, value=s["count"])
+        ws_sum.cell(row=r, column=4, value=s["total"])
+        ws_sum.cell(row=r, column=5, value=_format_ist(s["last_at"]))
+        ws_sum.cell(row=r, column=6, value=s["last_by"])
+        ws_sum.cell(row=r, column=7, value=_format_ist(s["first_at"]))
+    for col in range(1, len(ORDER_SUMMARY_HEADERS) + 1):
+        ws_sum.column_dimensions[get_column_letter(col)].width = 20
+    ws_sum.column_dimensions["F"].width = 30
 
     buf = BytesIO()
     wb.save(buf)

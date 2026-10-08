@@ -87,3 +87,23 @@ alter table orders enable row level security;
 drop policy if exists "service role full access" on orders;
 create policy "service role full access"
   on orders for all using (true);
+
+
+create table if not exists item_plans (
+  id          uuid primary key default gen_random_uuid(),
+  message_id  uuid references messages(id) on delete cascade,
+  item        text not null,
+  quantity    numeric not null,
+  unit        text,
+  created_at  timestamptz default now()
+);
+
+create index if not exists item_plans_item_idx       on item_plans (item);
+create index if not exists item_plans_created_idx    on item_plans (created_at desc);
+create index if not exists item_plans_message_idx    on item_plans (message_id);
+
+alter table item_plans enable row level security;
+
+drop policy if exists "service role full access" on item_plans;
+create policy "service role full access"
+  on item_plans for all using (true);

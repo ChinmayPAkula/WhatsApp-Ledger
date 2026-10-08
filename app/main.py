@@ -11,14 +11,15 @@ from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 from twilio.rest import Client as TwilioClient
 from twilio.request_validator import RequestValidator
-from app.database import save_message, get_recent_messages, save_entries, get_recent_entries, upload_report, save_stock_transaction, save_order, get_last_order, get_item_unit
+from app.database import save_message, get_recent_messages, save_entries, get_recent_entries, upload_report, save_stock_transaction, save_order, get_last_order, get_item_unit, save_item_plan
 from app.units import canonical_unit
 from app.extract import extract_entries
 from app.intent import classify_intent
-from app.report import generate_report_workbook, generate_stock_report_workbook, generate_message_log_workbook, generate_order_report_workbook, resolve_period
+from app.report import generate_report_workbook, generate_stock_report_workbook, generate_message_log_workbook, generate_order_report_workbook, generate_item_report_workbook, resolve_period
 from app.report_keywords import match_report_keyword
 from app.stock import parse_stock_message, is_report_command
 from app.orders import parse_order_message, format_last_ordered
+from app.item_plan import parse_plan_message, format_plan_line
 from app.audit import parse_log_request
 from app.notify import send_security_alert_async
 
@@ -162,6 +163,23 @@ async def send_order_report_async(to_whatsapp: str):
         print(f"⚠️  Failed to generate/send order report: {e}")
 
 
+async def send_item_report_async(to_whatsapp: str):
+    """Same async-delivery pattern as the other reports, for the all-time item plan report."""
+    try:
+        print("📋 Generating items report...")
+        content = await generate_item_report_workbook(requested_by="+" + to_whatsapp.replace("whatsapp:", "").lstrip("+"))
+        signed_url = await upload_report(f"items_{date.today().isoformat()}.xlsx", content)
+        twilio_client.messages.create(
+            from_=os.getenv("TWILIO_WHATSAPP_FROM"),
+            to=to_whatsapp,
+            body="Here's your items report (all item plans to date)",
+            media_url=[signed_url],
+        )
+        print(f"✅ Sent items report to {to_whatsapp}")
+    except Exception as e:
+        print(f"⚠️  Failed to generate/send items report: {e}")
+
+
 # ── HEALTH CHECK ──
 @app.get("/")
 async def root():
@@ -303,21 +321,42 @@ async def receive_twilio_message(
                 twiml = f"<Response><Message><Body>{xml_escape(reply)}</Body></Message></Response>"
                 return Response(content=twiml, media_type="application/xml")
 
-        # Step 2c: Exact report keywords ("Stock Report", "Order Report", with an
-        # optional "Get") — deterministic, so they never depend on the LLM
-        # classifier. "Items Report" is recognised but not built yet (no items
-        # table); it gets an explicit reply rather than falling through, where the
-        # LLM classifier would guess and send the wrong report.
+        # Step 2c: Explicit "Item Plan:" command — same deterministic gate, saved
+        # only to the item_plans table. Each message is its own row; plans for the
+        # same dish on the same day are kept, not merged.
         if msg_type == "text" and text.strip() and saved_message:
-            keyword = match_report_keyword(text)
-            if keyword and keyword["kind"] == "items":
-                reply = "📋 The items report isn't available yet."
+            plan_msg = await parse_plan_message(text)
+            if plan_msg is not None:
+                if not plan_msg["items"]:
+                    reply = "Couldn't read that item plan. Try:\nItem Plan:\nPaneer Cutlet 35 pcs\nCorn Cheese Balls 30 pcs"
+                else:
+                    # Same no-guessing rule as stock and orders: no unit, no logging.
+                    items = [i for i in plan_msg["items"] if i["unit"]]
+                    no_unit = [i for i in plan_msg["items"] if not i["unit"]]
+                    for i in items:
+                        await save_item_plan(saved_message["id"], i["item"], i["quantity"], i["unit"])
+                    reply = "📋 Item plan logged:\n" + "\n".join(format_plan_line(i) for i in items) if items else ""
+                    for i in no_unit:
+                        reply += ("\n" if reply else "") + (
+                            f"⚠️ Not logged: {i['item']} {i['quantity']:g} has no unit. "
+                            f"Please resend with a unit, e.g. \"{i['item']} {i['quantity']:g} pcs\".")
+                    if len(plan_msg["items"]) < plan_msg["attempted"]:
+                        reply += "\n⚠️ Some lines couldn't be confidently read — please check and resend those."
                 twiml = f"<Response><Message><Body>{xml_escape(reply)}</Body></Message></Response>"
                 return Response(content=twiml, media_type="application/xml")
-            if keyword and keyword["kind"] in ("stock", "order"):
+
+        # Step 2d: Exact report keywords ("Stock Report", "Order Report", "Items
+        # Report", with an optional "Get") — deterministic, so they never depend on
+        # the LLM classifier.
+        if msg_type == "text" and text.strip() and saved_message:
+            keyword = match_report_keyword(text)
+            if keyword:
                 if keyword["kind"] == "order":
                     background_tasks.add_task(send_order_report_async, From)
                     ack = "🛒 Got it — generating your order report now, I'll send it in a moment."
+                elif keyword["kind"] == "items":
+                    background_tasks.add_task(send_item_report_async, From)
+                    ack = "📋 Got it — generating your items report now, I'll send it in a moment."
                 else:
                     background_tasks.add_task(send_stock_report_async, From, keyword["period"])
                     ack = "📦 Got it — generating your stock report now, I'll send it in a moment."

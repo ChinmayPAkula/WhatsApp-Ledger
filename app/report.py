@@ -19,6 +19,7 @@ from app.database import (
     get_stock_transactions_between,
     get_messages_between,
     get_all_orders,
+    get_all_item_plans,
 )
 
 
@@ -351,6 +352,59 @@ async def generate_order_report_workbook(requested_by: str | None = None) -> byt
         ws_sum.cell(row=r, column=7, value=_format_ist(s["first_at"]))
     for col in range(1, len(ORDER_SUMMARY_HEADERS) + 1):
         ws_sum.column_dimensions[get_column_letter(col)].width = 20
+    ws_sum.column_dimensions["F"].width = 30
+
+    buf = BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+PLAN_HEADERS = ["Date", "Planned By", "Item", "Quantity", "Unit"]
+PLAN_SUMMARY_HEADERS = ["Item", "Unit", "Days Planned", "Total Quantity", "Last Planned", "Last Planned By"]
+
+
+async def generate_item_report_workbook(requested_by: str | None = None) -> bytes:
+    """All item plans to date, newest first, plus a per-item summary (how many
+    days each dish was planned and the total prepared). Every message is its own
+    row — two plans for the same dish on one day are both shown, not merged."""
+    plans = await get_all_item_plans()  # already newest first
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Item Plans"
+    generated_at = datetime.now(IST).strftime("%Y-%m-%d %H:%M")
+    ws.cell(row=1, column=1, value=f"Generated on {generated_at} IST · requested by {requested_by or 'scheduled report'}").font = BOLD
+    for col, header in enumerate(PLAN_HEADERS, start=1):
+        ws.cell(row=3, column=col, value=header).font = BOLD
+    for r, row in enumerate(plans, start=4):
+        ws.cell(row=r, column=1, value=_format_ist(row.get("created_at")))
+        ws.cell(row=r, column=2, value=_sender_label(row))
+        ws.cell(row=r, column=3, value=row.get("item"))
+        ws.cell(row=r, column=4, value=row.get("quantity"))
+        ws.cell(row=r, column=5, value=row.get("unit"))
+    for col in range(1, len(PLAN_HEADERS) + 1):
+        ws.column_dimensions[get_column_letter(col)].width = 22
+    ws.column_dimensions["B"].width = 30
+
+    summary: dict[tuple, dict] = {}
+    for row in plans:  # newest first, so the first row seen is the latest plan
+        key = ((row.get("item") or "").strip().lower(), row.get("unit"))
+        s = summary.setdefault(key, {"days": set(), "total": 0.0, "last_at": row.get("created_at"), "last_by": _sender_label(row)})
+        s["days"].add((_format_ist(row.get("created_at")) or "")[:10])
+        s["total"] += float(row["quantity"])
+
+    ws_sum = wb.create_sheet("Item Summary")
+    for col, header in enumerate(PLAN_SUMMARY_HEADERS, start=1):
+        ws_sum.cell(row=1, column=col, value=header).font = BOLD
+    for r, ((item, unit), s) in enumerate(sorted(summary.items(), key=lambda kv: kv[1]["last_at"] or "", reverse=True), start=2):
+        ws_sum.cell(row=r, column=1, value=item)
+        ws_sum.cell(row=r, column=2, value=unit)
+        ws_sum.cell(row=r, column=3, value=len(s["days"]))
+        ws_sum.cell(row=r, column=4, value=s["total"])
+        ws_sum.cell(row=r, column=5, value=_format_ist(s["last_at"]))
+        ws_sum.cell(row=r, column=6, value=s["last_by"])
+    for col in range(1, len(PLAN_SUMMARY_HEADERS) + 1):
+        ws_sum.column_dimensions[get_column_letter(col)].width = 22
     ws_sum.column_dimensions["F"].width = 30
 
     buf = BytesIO()

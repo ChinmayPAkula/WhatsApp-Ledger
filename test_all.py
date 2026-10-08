@@ -128,6 +128,17 @@ def test_deterministic_parsing():
     check("units: missing unit stays None", normalize_quantity(3, None) == (3, None, None))
     check("units: canonical_unit respells but never converts", canonical_unit("Gms") == "kg" and canonical_unit("packets") == "packets" and canonical_unit(None) is None)
 
+    from app.item_plan import count_plan_attempts, format_plan_line
+    pdf_plan = "Item Plan:\nCorn Cheese Balls 30 pcs\nPotato Croquettes 25 pcs\nPaneer Cutlet 35 pcs\nPaneer Papdi 28 pcs"
+    check("item plan: PDF block counts every dish line", count_plan_attempts(pdf_plan) == 4, str(count_plan_attempts(pdf_plan)))
+    check("item plan: inline 'Item Plan: Paneer Cutlet 35 pcs' counts once", count_plan_attempts("Item Plan: Paneer Cutlet 35 pcs") == 1)
+    check("item plan: header alone is not an attempt", count_plan_attempts("Item Plan:") == 0)
+    check("item plan: 'Items Report' is not a plan attempt", count_plan_attempts("Items Report") == 0)
+    check("item plan: Order: lines are not mistaken for plan or stock lines", count_plan_attempts(pdf_order) == 0)
+    check("item plan: lines are not mistaken for orders or stock", count_order_attempts(pdf_plan) == 0 and count_stock_attempts(pdf_plan) == 0)
+    check("item plan: an Order: block after a plan ends the plan block", count_plan_attempts("Item Plan:\nPaneer Cutlet 35 pcs\nOrder:\nMilk 2 ltr") == 1)
+    check("item plan: reply line formatting", format_plan_line({"item": "corn cheese balls", "quantity": 30.0, "unit": "pcs"}) == "Corn Cheese Balls 30pcs")
+
     from app.report_keywords import match_report_keyword
     check("keywords: 'Order Report' -> order", (match_report_keyword("Order Report") or {}).get("kind") == "order")
     check("keywords: 'Get Order Report' (any case) -> order", (match_report_keyword("get ORDER report") or {}).get("kind") == "order")
@@ -239,6 +250,15 @@ async def test_groq():
     check(
         "extract_stock_movements: In:/Out: header blocks set direction for every line below",
         ins == ["curd", "milk", "onion", "tomato"] and outs == ["curd", "milk", "onion", "tomato"],
+        str(r),
+    )
+
+    from app.item_plan import extract_plan_items
+    r = await extract_plan_items("Item Plan:\nCorn Cheese Balls 30 pcs\nPotato Croquettes 25 pcs\nPaneer Cutlet 35 pcs\nPaneer Papdi 28 pcs")
+    check(
+        "extract_plan_items: PDF sample keeps multi-word dish names with exact quantities",
+        sorted((m["item"], m["quantity"], m["unit"]) for m in r)
+        == [("corn cheese balls", 30.0, "pcs"), ("paneer cutlet", 35.0, "pcs"), ("paneer papdi", 28.0, "pcs"), ("potato croquettes", 25.0, "pcs")],
         str(r),
     )
 
@@ -497,11 +517,52 @@ def test_webhook_live():
                 r.status_code == 200 and "generating your stock report" in r.text,
                 r.text,
             )
+            # Item plans, sent before the Items Report request below.
+            r = post_webhook(client, "Item Plan:\nCorn Cheese Balls 30 pcs\nPaneer Cutlet 35 pcs")
+            check(
+                "Item Plan: block logs every dish",
+                r.status_code == 200 and "Item plan logged" in r.text and "Corn Cheese Balls 30pcs" in r.text and "Paneer Cutlet 35pcs" in r.text,
+                r.text,
+            )
+            r = post_webhook(client, "Item Plan: Paneer Cutlet 20 pcs")
+            check("inline 'Item Plan: ...' logs a second plan for the same dish", r.status_code == 200 and "Paneer Cutlet 20pcs" in r.text, r.text)
+            r = post_webhook(client, "Item Plan:\nPaneer Papdi 28")
+            check(
+                "item plan line with no unit is refused with a request for one",
+                r.status_code == 200 and "has no unit" in r.text and "Item plan logged" not in r.text,
+                r.text,
+            )
+
             r = post_webhook(client, "Items Report")
             check(
-                "'Items Report' says it isn't available yet instead of sending the wrong report",
-                r.status_code == 200 and "isn't available yet" in r.text and "generating" not in r.text,
+                "'Items Report' keyword acks the items report immediately",
+                r.status_code == 200 and "generating your items report" in r.text,
                 r.text,
+            )
+
+            from app.report import generate_item_report_workbook
+            from openpyxl import load_workbook
+            from io import BytesIO
+            wb = load_workbook(BytesIO(asyncio.run(generate_item_report_workbook(requested_by="+919999999999"))))
+            ws = wb["Item Plans"]
+            data = [[c.value for c in row] for row in ws.iter_rows(min_row=4)]
+            cutlet = [row for row in data if row[2] == "paneer cutlet"]
+            check(
+                "items report: sheets and header line are right",
+                wb.sheetnames == ["Item Plans", "Item Summary"] and "requested by +919999999999" in str(ws["A1"].value)
+                and [c.value for c in ws[3]] == ["Date", "Planned By", "Item", "Quantity", "Unit"],
+                f"{wb.sheetnames} {ws['A1'].value}",
+            )
+            check(
+                "items report: both same-day plans for a dish are kept, attributed to the sender, newest first",
+                len(cutlet) >= 2 and all(TEST_SENDER in str(row[1]) for row in cutlet) and cutlet[0][3] == 20 and cutlet[1][3] == 35,
+                str(cutlet),
+            )
+            plan_summary = {row[0].value: [c.value for c in row] for row in wb["Item Summary"].iter_rows(min_row=2)}
+            check(
+                "items report: summary totals the dish across plans (35 + 20 = 55 over 1 day)",
+                plan_summary.get("paneer cutlet", [None] * 6)[2] >= 1 and plan_summary["paneer cutlet"][3] >= 55,
+                str(plan_summary.get("paneer cutlet")),
             )
 
             # Order report contents: the orders logged above must show up, newest first,
@@ -612,13 +673,14 @@ def cleanup():
         supabase.table("entries").delete().in_("message_id", ids).execute()
         supabase.table("stock_transactions").delete().in_("message_id", ids).execute()
         supabase.table("orders").delete().in_("message_id", ids).execute()
+        supabase.table("item_plans").delete().in_("message_id", ids).execute()
         supabase.table("messages").delete().in_("id", ids).execute()
     print(f"  removed {len(ids)} test message(s) and their entries/stock rows (sender={TEST_SENDER})")
 
     # The REPORT / report-request commands' background tasks regenerate this
     # month's report files for real during the live webhook test — remove them.
     month = date.today().strftime("%Y-%m")
-    for regenerated in (f"stock_{month}.xlsx", f"ledger_{month}.xlsx", f"messagelog_{month}.xlsx", f"orders_{date.today().isoformat()}.xlsx"):
+    for regenerated in (f"stock_{month}.xlsx", f"ledger_{month}.xlsx", f"messagelog_{month}.xlsx", f"orders_{date.today().isoformat()}.xlsx", f"items_{date.today().isoformat()}.xlsx"):
         try:
             supabase.storage.from_("reports").remove([regenerated])
             print(f"  removed regenerated {regenerated}")
@@ -629,10 +691,15 @@ def cleanup():
 def main():
     test_imports()
     test_deterministic_parsing()
-    asyncio.run(test_groq())
-    asyncio.run(test_reports())
-    test_webhook_live()
-    cleanup()
+    try:
+        asyncio.run(test_groq())
+        asyncio.run(test_reports())
+        test_webhook_live()
+    finally:
+        # Even if a test crashes partway, never leave synthetic rows behind — they'd
+        # skew the next run's balances (a leftover stock row broke the next run's
+        # expected values).
+        cleanup()
 
     section("RESULT")
     print(f"{len(passed)} passed, {len(failed)} failed")

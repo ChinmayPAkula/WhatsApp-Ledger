@@ -81,6 +81,7 @@ async def extract_order_items(text: str) -> list[dict]:
             response_format={"type": "json_object"},
             temperature=0.1,
             max_tokens=4000,
+            extra_body={"reasoning_effort": "low"},
         )
         items = json.loads(completion.choices[0].message.content).get("items", [])
         if not isinstance(items, list):

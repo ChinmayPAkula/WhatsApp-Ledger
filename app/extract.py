@@ -105,6 +105,7 @@ async def extract_entries(message_text: str, message_timestamp: str = None) -> l
             response_format={"type": "json_object"},
             temperature=0.1,
             max_tokens=2000,
+            extra_body={"reasoning_effort": "low"},
         )
 
         raw = completion.choices[0].message.content

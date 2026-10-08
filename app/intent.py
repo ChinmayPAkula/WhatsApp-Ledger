@@ -56,7 +56,8 @@ async def classify_intent(message_text: str, message_timestamp: str = None) -> d
             ],
             response_format={"type": "json_object"},
             temperature=0.1,
-            max_tokens=500,
+            max_tokens=1500,
+            extra_body={"reasoning_effort": "low"},
         )
         parsed = json.loads(completion.choices[0].message.content)
         intent = parsed.get("intent")

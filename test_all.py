@@ -23,7 +23,7 @@ import sys
 import time
 import asyncio
 import subprocess
-from datetime import date
+from datetime import date, datetime, timezone
 
 import httpx
 from dotenv import load_dotenv
@@ -76,7 +76,7 @@ def test_imports():
 
 def test_deterministic_parsing():
     section("2. Deterministic parsing")
-    from app.stock import STOCK_ATTEMPT_RE, is_report_command, _quantity_verified_in_text
+    from app.stock import STOCK_ATTEMPT_RE, is_report_command, _quantity_verified_in_text, count_stock_attempts
     from app.report import resolve_period
 
     check(
@@ -103,6 +103,20 @@ def test_deterministic_parsing():
     check("report: UTC timestamp shown in IST", _format_ist("2026-10-07T10:00:00+00:00") == "2026-10-07 15:30")
     check("report: sender label with profile name", _sender_label({"sender_phone": "919876543210", "sender_name": "Ravi"}) == "Ravi (+919876543210)")
     check("report: sender label without profile name", _sender_label({"sender_phone": "919876543210", "sender_name": None}) == "+919876543210")
+
+    from app.orders import count_order_attempts, format_last_ordered
+    pdf_order = "Order:\nMilk 2 ltr\nOnion 5 kg\nCurd 2 ltr\nTomato 2 kg"
+    check("orders: PDF 'Order:' block counts every item line", count_order_attempts(pdf_order) == 4, str(count_order_attempts(pdf_order)))
+    check("orders: inline 'Order: Milk 2 ltr' counts once", count_order_attempts("Order: Milk 2 ltr") == 1)
+    check("orders: header alone is not an attempt", count_order_attempts("Order:") == 0)
+    check("orders: ordinary sentence starting with 'order' is not an attempt", count_order_attempts("order of 5 boxes arrived") == 0)
+    check("orders: In: block after Order: is not counted as an order", count_order_attempts("Order:\nMilk 2 ltr\nIn:\nOnion 5 kg") == 1)
+    check("orders: Order: lines are not mistaken for stock attempts", count_stock_attempts(pdf_order) == 0)
+    first = format_last_ordered({"item": "milk", "quantity": 2.0, "unit": "ltr"}, None)
+    check("orders: never-ordered item says first time", first == "Milk 2ltr — first time ordered", first)
+    last = {"created_at": "2026-10-03T10:00:00+00:00", "sender_phone": "919876543210", "sender_name": "Ravi"}
+    line = format_last_ordered({"item": "milk", "quantity": 2.0, "unit": "ltr"}, last, now=datetime(2026, 10, 8, 12, 0, tzinfo=timezone.utc))
+    check("orders: last-ordered line shows date, days ago and who", line == "Milk 2ltr — last ordered 03 Oct (5 days ago) by Ravi (+919876543210)", line)
 
     check("quantity cross-check: exact match found", _quantity_verified_in_text(50, "IN cement 50 bags"))
     check("quantity cross-check: decimal match found", _quantity_verified_in_text(2.5, "IN oil 2.5 litres"))
@@ -205,6 +219,14 @@ async def test_groq():
     check(
         "extract_stock_movements: In:/Out: header blocks set direction for every line below",
         ins == ["curd", "milk", "onion", "tomato"] and outs == ["curd", "milk", "onion", "tomato"],
+        str(r),
+    )
+
+    from app.orders import extract_order_items
+    r = await extract_order_items("Order:\nMilk 2 ltr\nOnion 5 kg\nCurd 2 ltr\nTomato 2 kg")
+    check(
+        "extract_order_items: PDF sample extracts 4 items with exact quantities",
+        sorted((m["item"], m["quantity"]) for m in r) == [("curd", 2.0), ("milk", 2.0), ("onion", 5.0), ("tomato", 2.0)],
         str(r),
     )
 
@@ -370,6 +392,29 @@ def test_webhook_live():
                 r.text,
             )
 
+            # Orders: sent twice so the second reply must report the first as "last ordered".
+            # The item is checked loosely on the first reply since real order history for
+            # that item may already exist in the database.
+            r = post_webhook(client, "Order:\nDragonfruit 3 kg\nMilk 2 ltr")
+            check(
+                "Order: block logs every item with a last-ordered line",
+                r.status_code == 200 and "Order logged" in r.text and r.text.count("Dragonfruit") == 1 and r.text.count("Milk") == 1
+                and r.text.count("ordered") >= 2,
+                r.text,
+            )
+            r = post_webhook(client, "Order: Dragonfruit 4 kg")
+            check(
+                "second order for the same item reports when it was last ordered",
+                r.status_code == 200 and "last ordered" in r.text and "today" in r.text and TEST_SENDER in r.text,
+                r.text,
+            )
+            r = post_webhook(client, "Order:")
+            check(
+                "'Order:' with no items falls through (not a stock/order attempt)",
+                r.status_code == 200 and "Order logged" not in r.text,
+                r.text,
+            )
+
             r = post_webhook(client, "REPORT")
             check(
                 "REPORT command acks immediately (async delivery not tested here)",
@@ -448,6 +493,7 @@ def cleanup():
     if ids:
         supabase.table("entries").delete().in_("message_id", ids).execute()
         supabase.table("stock_transactions").delete().in_("message_id", ids).execute()
+        supabase.table("orders").delete().in_("message_id", ids).execute()
         supabase.table("messages").delete().in_("id", ids).execute()
     print(f"  removed {len(ids)} test message(s) and their entries/stock rows (sender={TEST_SENDER})")
 

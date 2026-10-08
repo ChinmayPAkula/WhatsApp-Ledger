@@ -214,3 +214,31 @@ async def get_stock_transactions_between(start: date, end: date) -> list[dict]:
         row["sender_phone"] = message.get("sender_phone")
         row["sender_name"] = (message.get("raw_payload") or {}).get("ProfileName")
     return rows
+
+
+# ── ORDERS ("Order:" command log) ──
+
+async def get_last_order(item: str) -> dict | None:
+    """Most recent order for this item, joined to messages for who placed it —
+    used for the "last ordered" line in the confirmation reply."""
+    result = (
+        supabase.table("orders")
+        .select("*, messages(sender_phone, raw_payload)")
+        .eq("item", item)
+        .order("created_at", desc=True)
+        .limit(1)
+        .execute()
+    )
+    if not result.data:
+        return None
+    row = result.data[0]
+    message = row.pop("messages", None) or {}
+    row["sender_phone"] = message.get("sender_phone")
+    row["sender_name"] = (message.get("raw_payload") or {}).get("ProfileName")
+    return row
+
+
+async def save_order(message_id: str, item: str, quantity: float, unit: str | None) -> dict:
+    row = {"message_id": message_id, "item": item, "quantity": quantity, "unit": unit}
+    result = supabase.table("orders").insert(row).execute()
+    return result.data[0] if result.data else None

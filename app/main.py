@@ -11,11 +11,12 @@ from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 from twilio.rest import Client as TwilioClient
 from twilio.request_validator import RequestValidator
-from app.database import save_message, get_recent_messages, save_entries, get_recent_entries, upload_report, save_stock_transaction
+from app.database import save_message, get_recent_messages, save_entries, get_recent_entries, upload_report, save_stock_transaction, save_order, get_last_order
 from app.extract import extract_entries
 from app.intent import classify_intent
 from app.report import generate_report_workbook, generate_stock_report_workbook, generate_message_log_workbook, resolve_period
 from app.stock import parse_stock_message, is_report_command
+from app.orders import parse_order_message, format_last_ordered
 from app.audit import parse_log_request
 from app.notify import send_security_alert_async
 
@@ -239,6 +240,26 @@ async def receive_twilio_message(
                     "</Message></Response>"
                 )
                 return Response(content=twiml, media_type="application/xml", background=background_tasks)
+
+        # Step 2b: Explicit "Order:" command — deterministic gate like the stock
+        # commands, saved only to the orders table. Each item's previous order is
+        # looked up for ALL items before any row is inserted, so two lines for the
+        # same item in one message don't report each other as "last ordered".
+        if msg_type == "text" and text.strip() and saved_message:
+            order_msg = await parse_order_message(text)
+            if order_msg is not None:
+                if not order_msg["items"]:
+                    reply = "Couldn't read that order. Try:\nOrder:\nMilk 2 ltr\nOnion 5 kg"
+                else:
+                    previous = [await get_last_order(i["item"]) for i in order_msg["items"]]
+                    for i in order_msg["items"]:
+                        await save_order(saved_message["id"], i["item"], i["quantity"], i["unit"])
+                    lines = [format_last_ordered(i, last) for i, last in zip(order_msg["items"], previous)]
+                    reply = "🛒 Order logged:\n" + "\n".join(lines)
+                    if len(order_msg["items"]) < order_msg["attempted"]:
+                        reply += "\n⚠️ Some lines couldn't be confidently read — please check and resend those."
+                twiml = f"<Response><Message><Body>{xml_escape(reply)}</Body></Message></Response>"
+                return Response(content=twiml, media_type="application/xml")
 
         # Step 3: Password-gated audit log request — deliberately deterministic
         # (no LLM involved in a security-sensitive check) and checked before the

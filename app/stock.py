@@ -112,7 +112,7 @@ async def extract_stock_movements(text: str) -> list[dict]:
             ],
             response_format={"type": "json_object"},
             temperature=0.1,
-            max_tokens=800,
+            max_tokens=4000,
         )
         parsed = json.loads(completion.choices[0].message.content)
         movements = parsed.get("movements", [])
